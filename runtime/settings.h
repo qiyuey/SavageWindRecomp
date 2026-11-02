@@ -1,6 +1,7 @@
 // User settings (savagewind.ini in the data root, runtime/paths.h), edited from the in-game menu.
 #pragma once
 #include <stdbool.h>
+#include "rumble_strength.h"
 
 // Upscalers (Video > Upscaler; runtime/nvn/output_scale.c): Off renders at the window's size; the others render
 // smaller by their quality mode's factor and scale up to the window. DLSS is listed as coming later.
@@ -70,6 +71,7 @@ typedef struct {
     int fps_limit;       // frame rate, frames per second (FPS_CHOICES; 0: no limit)
     int vsync;           // VSYNC_*
     bool rumble;         // controller vibration
+    int rumble_strength; // 0..100%, base gain 10; default 50 (original amplitude x5)
     int gpu;             // Vulkan adapter index from the startup log; -1: automatic (restart required)
     bool dpad_move;      // the d-pad (and arrow keys) also act as the left stick while it is at rest
     float stick_deadzone[2];  // left, right stick: a controller's stick reads 0 within this much of full tilt (radial)

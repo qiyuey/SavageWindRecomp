@@ -11,6 +11,14 @@
 
 #include "../shader_archive.h"
 #include "shaders.h"
+#include "../../perfmon.h"
+
+static ShaderInfo *translate_tracked(const uint8_t *code, size_t max_size, int stage, const ShaderKey *key) {
+    perf_build_begin(PERF_BUILD_SHADER);
+    ShaderInfo *si = maxwell_translate(code, max_size, stage, key);
+    perf_build_end(PERF_BUILD_SHADER);
+    return si;
+}
 
 // What the translated shaders depend on besides their binaries: the translator's sources (maxwell_translator_id)
 // and the GLSL -> SPIR-V step's (vk_spirv_id). Caches built from translated shaders (cache/xlate, the pipeline cache,
@@ -495,7 +503,7 @@ int vk_precompile_one(const uint8_t *code, size_t max_size, int stage, const Sha
     ShaderInfo *si = xlate_load(h, &hd, stage);
     bool made = false;
     if (!si) {
-        si = maxwell_translate(code, max_size, stage, key);
+        si = translate_tracked(code, max_size, stage, key);
         if (!si->msl) {
             snprintf(why, nwhy, "translation failed: %s", si->error);
             maxwell_free(si);
@@ -530,7 +538,7 @@ ShaderInfo *vk_translate_peek(const uint8_t *code, size_t max_size, int stage, c
 }
 
 ShaderInfo *vk_translate_cached(const uint8_t *code, size_t max_size, int stage, const ShaderKey *key) {
-    if (xlate_off()) return maxwell_translate(code, max_size, stage, key);
+    if (xlate_off()) return translate_tracked(code, max_size, stage, key);
     XlateHeader hd;
     uint64_t h = xlate_id(code, max_size, stage, key, &hd);
     pthread_mutex_lock(&xlate_lock);
@@ -542,7 +550,7 @@ ShaderInfo *vk_translate_cached(const uint8_t *code, size_t max_size, int stage,
     keylog_add(code, max_size, stage, key);
     si = xlate_load(h, &hd, stage);
     if (si && getenv("SAVAGEWIND_XLATE_VERIFY")) {  // (debugging) the cached translation is the one the translator gives
-        ShaderInfo *f = maxwell_translate(code, max_size, stage, key);
+        ShaderInfo *f = translate_tracked(code, max_size, stage, key);
         ShaderInfo a = *si, b = *f;
         a.msl = b.msl = NULL;
         bool same = f->msl && !strcmp(f->msl, si->msl) && !memcmp(&a, &b, sizeof a);
@@ -556,7 +564,7 @@ ShaderInfo *vk_translate_cached(const uint8_t *code, size_t max_size, int stage,
         maxwell_free(f);
     }
     if (!si) {
-        si = maxwell_translate(code, max_size, stage, key);
+        si = translate_tracked(code, max_size, stage, key);
         if (!si->msl) return si;
         hd.msl_len = (uint32_t)strlen(si->msl);
         xlate_store(h, &hd, si);

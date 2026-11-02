@@ -26,6 +26,7 @@ Settings g_settings = {
     .reverb = true,
     .movie_audio = true,
     .rumble = true,
+    .rumble_strength = RUMBLE_STRENGTH_DEFAULT,
     .damage_taken = 100,
     .damage_dealt = 100,
     .upscaler = UPSCALE_DEFAULT,  // (Off: the window's resolution; MetalFX on macOS)
@@ -161,6 +162,7 @@ void settings_load(void) {
             g_settings.sharpening = p < 0 ? 0 : p > 100 ? 10 : (p + 5) / 10;
         }
         else if (!strcmp(key, "rumble")) g_settings.rumble = atoi(val) != 0;
+        else if (!strcmp(key, "rumble_strength")) g_settings.rumble_strength = atoi(val);
         else if (!strcmp(key, "dpad_move")) g_settings.dpad_move = atoi(val) != 0;
         else if (!strcmp(key, "left_stick_deadzone")) g_settings.stick_deadzone[0] = (float)atof(val) / 100;  // (percent)
         else if (!strcmp(key, "right_stick_deadzone")) g_settings.stick_deadzone[1] = (float)atof(val) / 100;
@@ -263,6 +265,7 @@ void settings_load(void) {
         LOG("[settings] %s: version %d async_shaders 0 -> 1 (the new default)\n", SETTINGS_FILE, version);
     }
     if (!tip_key) g_settings.menu_tip_seen = true;  // (a settings file from before the note: not a first launch)
+    g_settings.rumble_strength = rumble_strength_percent(g_settings.rumble_strength);
     if (g_settings.volume < 0) g_settings.volume = 0;
     if (g_settings.volume > 2) g_settings.volume = 2;
     if (g_settings.fps_limit < 0) g_settings.fps_limit = 0;
@@ -332,6 +335,7 @@ void settings_save(void) {
     fprintf(f, "sharpening = %d\n", g_settings.sharpening * 10);
     fprintf(f, "frame_generation = %d\n", g_settings.frame_gen ? 1 : 0);
     fprintf(f, "rumble = %d\n", g_settings.rumble);
+    fprintf(f, "rumble_strength = %d\n", g_settings.rumble_strength);
     fprintf(f, "dpad_move = %d\n", g_settings.dpad_move);
     fprintf(f, "left_stick_deadzone = %.0f\n", g_settings.stick_deadzone[0] * 100);
     fprintf(f, "right_stick_deadzone = %.0f\n", g_settings.stick_deadzone[1] * 100);

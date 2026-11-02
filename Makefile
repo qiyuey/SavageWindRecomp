@@ -32,6 +32,8 @@ endif
 B         ?= build
 MACOS_MIN ?=
 DEPS      ?=
+SDL3_ROOT ?= D:/Code/Switch/SDL3
+SDL3_LIBDIR ?= $(SDL3_ROOT)/build/windows-x64-release/Release
 MINFLAG  := $(if $(MACOS_MIN),-mmacosx-version-min=$(MACOS_MIN))
 CC       := clang $(MINFLAG) $(CROSS)
 CXX      := clang++ $(MINFLAG) $(CROSS)
@@ -107,14 +109,14 @@ GAMELIB_LDFLAGS := -shared -fuse-ld=lld  # (the runtime functions it calls: the 
 GAMELIB_SHARED := -shared
 else
 EXE      := $(B)/savagewind.exe
-DEPINC   := $(if $(DEPS),-I$(DEPS)/include)
+DEPINC   := -I$(SDL3_ROOT)/include $(if $(DEPS),-I$(DEPS)/include)
 OSFLAGS  := -D_FILE_OFFSET_BITS=64 -D_POSIX_THREAD_SAFE_FUNCTIONS -D_CRT_RAND_S -DWIN32_LEAN_AND_MEAN -DNOMINMAX
 GENARCH  ?= -march=x86-64-v3  # AVX2 + FMA for the lifted FP/SIMD code (simd.h)
 GENARCH_COMPAT ?= -march=x86-64-v2  # CPUs without them (GAMELIB_ID_COMPAT below)
 GENFLAGS += -D_FILE_OFFSET_BITS=64 $(GENARCH)
 # --stack: every thread's default stack, reserved (committed as it grows): 256 MB, the guest threads' recursion runs on
 # it (runtime/kernel.c thread_start)
-LDFLAGS  := -fuse-ld=lld -Wl,--stack,268435456 $(if $(DEPS),-L$(DEPS)/lib) -lSDL3 -lavformat -lavcodec -lavutil -lswscale \
+LDFLAGS  := -fuse-ld=lld -Wl,--stack,268435456 $(if $(DEPS),-L$(DEPS)/lib) $(SDL3_LIBDIR)/SDL3.lib -lavformat -lavcodec -lavutil -lswscale \
             -lvulkan-1 -lwinmm -lole32 -lshell32 -lcomdlg32 -luuid -lshaderc_shared -lpdh -lws2_32 -l:libz.a \
             $(if $(RELEASE),-Wl$(comma)--subsystem$(comma)windows)  # release: no console window (log -> savagewind.log)
 BACKEND_SRC := $(wildcard runtime/nvn/vulkan/*.c) $(wildcard runtime/nvn/vulkan/*.cpp)
@@ -261,8 +263,16 @@ $(EXE): $(RT_OBJ) $(BACKEND_OBJ) $(UI_OBJ) $(IMGUI_OBJ)
 	mv -f $(dir $@)link/$(notdir $@) $@
 
 # its id file (<library>.id) says what it was built from without loading it (runtime/gamelib.c)
-$(GAMELIB): $(GEN_OBJ) | $(EXE)
-	$(CC) $(GAMELIB_LDFLAGS) -o $@.tmp $^
+
+# The generated game library has hundreds of object files. On Windows the
+# expanded linker command exceeds the shell's argument limit, so feed the
+# current object list through a response file. Old objects from a previous
+# generator layout must not be linked after chunks are renamed or removed.
+$(B)/swgame.rsp: $(GEN_OBJ) Makefile
+	$(file >$@,$(GEN_OBJ))
+
+$(GAMELIB): $(GEN_OBJ) $(B)/swgame.rsp | $(EXE)
+	$(CC) $(GAMELIB_LDFLAGS) -o $@.tmp @$(B)/swgame.rsp
 	mv -f $@.tmp $@
 	echo $(GAMELIB_ID) > $@.id
 
@@ -432,6 +442,10 @@ $(B)/test_pc_settings: tests/test_pc_settings.c runtime/settings.c runtime/setti
 	@mkdir -p $(dir $@)
 	$(CC) -O1 -DSDL_STATIC_LIB $(OSFLAGS) $(DEPINC) -Iruntime -o $@ $< -lSDL3 -lm
 
+$(B)/test_rumble_settings: tests/test_rumble_settings.c runtime/settings.c runtime/settings.h runtime/rumble_strength.h runtime/hle/bindings.c
+	@mkdir -p $(dir $@)
+	$(CC) -O1 -DSDL_STATIC_LIB $(OSFLAGS) $(DEPINC) -Iruntime -o $@ $< -lSDL3 -lm
+
 $(B)/test_gpu_settings: tests/test_gpu_settings.c runtime/settings.c runtime/settings.h runtime/gpu_select.h runtime/hle/bindings.c
 	@mkdir -p $(dir $@)
 	$(CC) -O1 -DSDL_STATIC_LIB $(OSFLAGS) $(DEPINC) -Iruntime -o $@ $< -lSDL3 -lm
@@ -476,7 +490,7 @@ test-output-scale: $(B)/test_output_scale
 
 .PHONY: test-output-scale
 
-$(B)/test_vibration: tools/test_vibration.c runtime/hle/vibration.c runtime/vibration.h runtime/settings.h runtime/services/hid_set.c
+$(B)/test_vibration: tools/test_vibration.c runtime/hle/vibration.c runtime/vibration.h runtime/settings.h runtime/rumble_strength.h runtime/betop_haptics.h runtime/services/hid_set.c
 	@mkdir -p $(B)
 	$(CC) -O1 -DSDL_STATIC_LIB $(OSFLAGS) $(DEPINC) -Iruntime -o $@ tools/test_vibration.c -lpthread -lm
 
@@ -484,6 +498,35 @@ test-vibration: $(B)/test_vibration
 	$(B)/test_vibration
 
 .PHONY: test-vibration
+
+$(B)/rt/betop_haptics.o: runtime/betop_haptics_profiles.h
+
+$(B)/test_betop_haptics: tools/test_betop_haptics.c runtime/betop_haptics.c runtime/betop_haptics.h runtime/betop_haptics_profiles.h
+	@mkdir -p $(B)
+	$(CC) -O1 -DSDL_STATIC_LIB $(OSFLAGS) $(DEPINC) -Iruntime -o $@ tools/test_betop_haptics.c -lpthread -lm
+
+test-betop-haptics: $(B)/test_betop_haptics
+	$(B)/test_betop_haptics
+
+.PHONY: test-betop-haptics
+
+$(B)/test_betop_game_state: tools/test_betop_game_state.c runtime/betop_game_state.c runtime/betop_game_state.h runtime/betop_haptics.h
+	@mkdir -p $(B)
+	$(CC) -O1 -DSDL_STATIC_LIB $(OSFLAGS) $(DEPINC) -Iruntime -o $@ tools/test_betop_game_state.c runtime/betop_game_state.c
+
+test-betop-game-state: $(B)/test_betop_game_state
+	$(B)/test_betop_game_state
+
+.PHONY: test-betop-game-state
+
+$(B)/test_betop_game_state_runtime: tools/test_betop_game_state_runtime.c runtime/betop_game_state_runtime.c runtime/betop_haptics.c runtime/betop_haptics.h runtime/betop_haptics_profiles.h runtime/betop_game_state.h runtime/game_sites.h
+	@mkdir -p $(B)
+	$(CC) -O1 -DSDL_STATIC_LIB $(OSFLAGS) $(DEPINC) -Iruntime -Wno-unused-function -o $@ $< -lpthread -lm
+
+test-betop-game-state-runtime: $(B)/test_betop_game_state_runtime
+	$(B)/test_betop_game_state_runtime
+
+.PHONY: test-betop-game-state-runtime
 
 # The input test includes input.c; discard its unused HLE functions and their runtime dependencies.
 $(B)/test_input_focus: tools/test_input_focus.c tools/test_pointer_disabled.h runtime/hle/input.c $(RT_HDRS)

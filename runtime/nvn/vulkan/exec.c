@@ -1,3 +1,4 @@
+#include "../../perfmon.h"
 // Executes recorded NVN command lists with Vulkan (port of renderer.m; same structure, same behaviour).
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_cpuinfo.h>
@@ -2195,7 +2196,9 @@ static VkPipeline clear_pipeline(int index, int kind, uint32_t mask, bool depth,
                                        .pRasterizationState = &rs, .pMultisampleState = &ms, .pDepthStencilState = &ds,
                                        .pColorBlendState = &cb, .pDynamicState = &dy, .layout = pc_layout()};
     VkPipeline p = VK_NULL_HANDLE;
+    perf_build_begin(PERF_BUILD_PIPE);
     if (vkCreateGraphicsPipelines(g_vk.dev, g_vk.pcache, 1, &pi, NULL, &p) != VK_SUCCESS) LOG("[vk] clear pipeline failed\n");
+    perf_build_end(PERF_BUILD_PIPE);
     clear_tab[slot].key = key;
     clear_tab[slot].pipe = p;
     return p;
@@ -3091,7 +3094,9 @@ static VkResult create_pipeline_in(const PipeState *k, VkShaderModule vsm, VkSha
                                        .pColorBlendState = &cb, .pDynamicState = &dy, .layout = layout,
                                        .flags = k->feedback ? VK_PIPELINE_CREATE_COLOR_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT : 0};
     *out = VK_NULL_HANDLE;
+    perf_build_begin(PERF_BUILD_PIPE);
     VkResult r = vkCreateGraphicsPipelines(g_vk.dev, cache, 1, &pi, NULL, out);
+    perf_build_end(PERF_BUILD_PIPE);
     if (r != VK_SUCCESS) {
         static int n;
         if (n++ < 10) LOG("[vk] pipeline creation failed: %d\n", r);
@@ -3137,7 +3142,9 @@ static VkResult gpl_create(VkGraphicsPipelineCreateInfo *pi, VkGraphicsPipelineL
     pi->pNext = &fci;
     pi->flags |= VK_PIPELINE_CREATE_LIBRARY_BIT_KHR;
     *out = VK_NULL_HANDLE;
+    perf_build_begin(PERF_BUILD_PIPE);
     VkResult r = vkCreateGraphicsPipelines(g_vk.dev, cache, 1, pi, NULL, out);
+    perf_build_end(PERF_BUILD_PIPE);
     if (r == VK_PIPELINE_COMPILE_REQUIRED) {
         *out = VK_NULL_HANDLE;  // (lookup only: not in that cache)
     } else if (r != VK_SUCCESS) {
@@ -3345,7 +3352,9 @@ static VkResult make_graphics(const PipeState *s, StageBuild *v, StageBuild *f, 
                                                  .pLibraries = libs};
             VkGraphicsPipelineCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &li, .layout = layout};
             *out = VK_NULL_HANDLE;
+            perf_build_begin(PERF_BUILD_PIPE);
             VkResult r = vkCreateGraphicsPipelines(g_vk.dev, VK_NULL_HANDLE, 1, &pi, NULL, out);
+            perf_build_end(PERF_BUILD_PIPE);
             if (r == VK_SUCCESS) return r;
             static int n;
             if (n++ < 10) LOG("[vk] pipeline link failed: %d (made whole)\n", r);
@@ -6173,7 +6182,9 @@ static void cs_make(CsBuild *c) {
                                                     .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = m, .pName = "main",
                                                     .pSpecializationInfo = &spec},
                                           .layout = c->layout};
+        perf_build_begin(PERF_BUILD_PIPE);
         r = m ? vkCreateComputePipelines(g_vk.dev, g_vk.pcache, 1, &ci, NULL, &c->pipe) : VK_ERROR_INVALID_SHADER_NV;
+        perf_build_end(PERF_BUILD_PIPE);
         if (r == VK_SUCCESS) cache_feedback(&fb);
         else LOG("[compute] pipeline failed: %d\n", r);
     }
@@ -6588,7 +6599,9 @@ bool vk_pso_warm_compute(const ShaderInfo *si, const uint32_t local[3]) {
                                                 .pSpecializationInfo = &spec},
                                       .layout = l};
     VkPipeline p;
+    perf_build_begin(PERF_BUILD_PIPE);
     bool ok = vkCreateComputePipelines(g_vk.dev, g_vk.pcache, 1, &ci, NULL, &p) == VK_SUCCESS;
+    perf_build_end(PERF_BUILD_PIPE);
     extern void vk_pipeline_cache_note(bool hit);
     if (ok) vk_pipeline_cache_note(false);
     if (ok) vkDestroyPipeline(g_vk.dev, p, NULL);
@@ -8240,7 +8253,9 @@ static VkPipeline present_pipeline(VkFormat fmt) {
                                        .pRasterizationState = &rs, .pMultisampleState = &ms, .pDepthStencilState = &ds,
                                        .pColorBlendState = &cb, .pDynamicState = &dy, .layout = present_layout};
     VkPipeline p;
+    perf_build_begin(PERF_BUILD_PIPE);
     VK_CHECK(vkCreateGraphicsPipelines(g_vk.dev, g_vk.pcache, 1, &pi, NULL, &p));
+    perf_build_end(PERF_BUILD_PIPE);
     for (int i = 0; i < 4; i++) if (!cache[i].p) { cache[i].f = fmt; cache[i].p = p; break; }
     return p;
 }
@@ -8300,7 +8315,9 @@ static VkPipeline post_pipeline(const char *fs, VkFormat fmt) {
                                        .pRasterizationState = &rs, .pMultisampleState = &ms, .pDepthStencilState = &ds,
                                        .pColorBlendState = &cb, .pDynamicState = &dy, .layout = post_layout};
     VkPipeline p;
+    perf_build_begin(PERF_BUILD_PIPE);
     VK_CHECK(vkCreateGraphicsPipelines(g_vk.dev, g_vk.pcache, 1, &pi, NULL, &p));
+    perf_build_end(PERF_BUILD_PIPE);
     for (int i = 0; i < 16; i++) if (!cache[i].p) { cache[i].fs = fs; cache[i].f = fmt; cache[i].p = p; break; }
     return p;
 }
@@ -8447,7 +8464,9 @@ static void cpost_pass(VkCommandBuffer cb, const char *cs, const VkImageView *sr
                                           .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
                                                     .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = vk_builtin_shader(cs), .pName = "main"},
                                           .layout = cpost_layout};
+        perf_build_begin(PERF_BUILD_PIPE);
         VK_CHECK(vkCreateComputePipelines(g_vk.dev, g_vk.pcache, 1, &ci, NULL, &pipe));
+        perf_build_end(PERF_BUILD_PIPE);
         for (int i = 0; i < 16; i++) if (!cache[i].p) { cache[i].cs = cs; cache[i].p = pipe; break; }
     }
     vk_full_barrier(cb);

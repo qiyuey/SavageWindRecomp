@@ -1,3 +1,4 @@
+#include "../../perfmon.h"
 // Vulkan textures: NVN formats, images, change-detected uploads from guest memory, views and samplers
 // (counterpart of the texture half of metal.m and the view helpers of renderer.m).
 #include <SDL3/SDL_timer.h>
@@ -1701,7 +1702,9 @@ static bool bc4d_init(void) {
                                       .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
                                                 .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = m, .pName = "main"},
                                       .layout = g_bc4d.pl};
+    perf_build_begin(PERF_BUILD_PIPE);
     VkResult r = vkCreateComputePipelines(g_vk.dev, VK_NULL_HANDLE, 1, &ci, NULL, &g_bc4d.pipe);
+    perf_build_end(PERF_BUILD_PIPE);
     vkDestroyShaderModule(g_vk.dev, m, NULL);
     if (r != VK_SUCCESS) goto fail;
     g_bc4d.ok = true;

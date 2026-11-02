@@ -616,3 +616,8 @@ T("Vibrate the controller during play.", "遊玩時讓控制器震動。")
 T("Sharper text", "")
 T("Upscales the game's letters for 1440p and 4K, after a restart. Not the original art.", "為 1440p 和 4K 放大遊戲的文字，重新啟動後生效。不是原版美術。")
 T("Makes the game's letters sharper on 1440p and 4K screens. It takes effect the next time you start the game. This is an upscale made on your computer from the game's own letters, not Nintendo's original art: the shapes are kept, but they aren't exactly as drawn. 4x takes a moment longer to start and uses more video memory.", "讓遊戲的文字在 1440p 和 4K 螢幕上更清晰。下次啟動遊戲時生效。這是在你的電腦上根據遊戲本身的文字放大的，不是任天堂的原版美術：形狀保留，但與原畫並不完全相同。4x 啟動稍慢，並佔用更多顯示記憶體。")
+
+T("Rumble strength", "震動強度")
+T("0%: off. 10%: original strength. 50%: 5x. 100%: 10x, limited to full output.", "0%：關閉；10%：原始強度；50%：5倍；100%：10倍，超出時限制到滿幅。")
+
+T("Shaders %llu(%d) | Pipelines %llu(%d)", "著色器 %llu(%d)次 | 管線 %llu(%d)次")

@@ -576,6 +576,15 @@ void build_items(void) {
     v.push_back(toggle(P_CONTROLS, "Controller rumble", "Vibrate the controller during play.",
                        [](const Item &) { return (int)g_settings.rumble; },
                        [](const Item &, int x) { g_settings.rumble = x; }, 1));
+    v.push_back(choice(P_CONTROLS, "Rumble strength", "0%: off. 10%: original strength. 50%: 5x. 100%: 10x, limited to full output.",
+                       [](const Item &) { return 21; },
+                       [](const Item &, int x) {
+                           static std::string s;
+                           s = pct(x * 5);
+                           return s.c_str();
+                       },
+                       [](const Item &) { return (g_settings.rumble_strength + 2) / 5; },
+                       [](const Item &, int x) { g_settings.rumble_strength = x * 5; }, RUMBLE_STRENGTH_DEFAULT / 5));
     v.push_back(toggle(P_CONTROLS, "D-pad as left stick", "The d-pad also moves like the left stick.",
                        [](const Item &) { return (int)g_settings.dpad_move; },
                        [](const Item &, int x) { g_settings.dpad_move = x; }, 0));

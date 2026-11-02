@@ -359,6 +359,17 @@ static void window_focus(bool focused) {
     mouse_dx_milli = mouse_dy_milli = cam_dx_milli = cam_dy_milli = 0;
     recompute_pad();  // release cached controls on loss; sample current controls on return
 }
+void input_shutdown(void) {
+    // The Vulkan exit path deliberately skips DLL teardown. Close the pad
+    // explicitly so the companion worker flushes neutral reports before exit.
+    SDL_Gamepad *closing = pad;
+    pad = NULL;
+    if (closing) {
+        vibration_update(closing, false);
+        SDL_CloseGamepad(closing);
+    }
+}
+
 void input_focus_update(SDL_Window *w) {
     window_focus(w && (SDL_GetWindowFlags(w) & SDL_WINDOW_INPUT_FOCUS));
 }

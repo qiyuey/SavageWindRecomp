@@ -187,6 +187,12 @@ int main(void) {
     sample(0, false);
     SDL_DestroyWindow(hidden);
 
+    focus(true);
+    sample(held, true);
+    input_shutdown();
+    assert(pad == NULL && !vibrating);
+    input_shutdown(); // Idempotent when exit and window teardown both run.
+
     assert(SDL_DetachVirtualJoystick(id));
     pump();
     sample(0, false);

@@ -17,6 +17,12 @@
     X(frame_loop_interval_ret) /* the frame loop's return address from setting the present interval */                \
     X(title_version_format)    /* "Ver.%s": the title screen's version line */                                         \
     X(player_info)             /* uking::act::PlayerInfo * (test tools) */                                              \
+    X(betop_state_bow) /* Verified Player action layout; not called by host. */ \
+    X(betop_state_upper) /* Verified Player action layout; not called by host. */ \
+    X(betop_state_lower) /* Verified Player action layout; not called by host. */ \
+    X(betop_state_list) /* Verified Player action layout; not called by host. */ \
+    X(betop_state_name) /* Verified Player action layout; not called by host. */ \
+    X(betop_state_guard) /* Verified Player action layout; not called by host. */ \
     X(world_mgr)               /* ksys::world::Manager * (test tools) */                                                \
     X(main_data)               /* main's .data (then .bss, up to main_end) */                                           \
     X(main_end)

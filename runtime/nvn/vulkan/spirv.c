@@ -1,3 +1,4 @@
+#include "../../perfmon.h"
 // GLSL -> SPIR-V: shaderc, the vertex-shader post-processing (no_contraction) and the SPIR-V disk cache. What this
 // file makes is part of every shader cache's key (vk_spirv_id: a hash of this file, from the Makefile), so it holds
 // only that step.
@@ -192,7 +193,9 @@ uint32_t *vk_glsl_to_spirv(const char *src, int stage, const char *name, size_t 
     shaderc_compile_options_set_target_env(o, shaderc_target_env_vulkan, shaderc_env_version_vulkan_1_3);
     shaderc_compile_options_set_optimization_level(o, getenv("SAVAGEWIND_VK_OPT") ? shaderc_optimization_level_performance
                                                                                   : shaderc_optimization_level_zero);
+    perf_build_begin(PERF_BUILD_SHADER);
     shaderc_compilation_result_t r = shaderc_compile_into_spv(comp, src, strlen(src), kind_of(stage), name, "main", o);
+    perf_build_end(PERF_BUILD_SHADER);
     shaderc_compile_options_release(o);
     if (shaderc_result_get_compilation_status(r) != shaderc_compilation_status_success) {
         static int nlog;

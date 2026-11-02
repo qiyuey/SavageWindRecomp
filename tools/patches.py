@@ -12,7 +12,7 @@ The Link's Awakening patches this file held in LASRecomp are kept in the archive
 """
 import struct
 
-from game_sites import adrp_page, sext
+from game_sites import adrp_page, sext, parse_pattern, BETOP_EFFECT_PLAY
 
 
 def _word(gen, a):
@@ -214,6 +214,26 @@ def _frame_wait(gen, a):
     return ('{ extern int rt_frame_wait(void); if (rt_frame_wait()) return; '
             'uint64_t ea = c->sp - 0x30; ST64(ea, c->x[29]); ST64(ea + 8, c->x[30]); c->sp = ea; }'
             f'  /* {a:#x}: stp x29, x30, [sp, #-0x30]! (frame wait) */')
+
+
+def _betop_effect_event(gen, a):
+    # The common contact-effect helper has resolved a named resource and checked the actor's emitter.
+    # 1.8.2: helper 0x70010e2d2c / BL 0x70010e2db8; 1.9.0: 0x70011f6abc / 0x70011f6b48.
+    # x19 retains the event (RumbleType at +0x90), x21 the actor (SafeString at +8, text at +16).
+    # Observe only: do not replace, suppress or invent the game's existing rumble/audio/effect work.
+    # Do not use a stale KNOWN fallback if this helper's register layout changed.
+    for i, (value, mask) in enumerate(parse_pattern(BETOP_EFFECT_PLAY)):
+        assert _word(gen, a - 12 + 4 * i) & mask == value, hex(a - 12 + 4 * i)
+    w = _word(gen, a)
+    assert w >> 26 == 0x25, hex(w)
+    target = a + (sext(w & 0x3ffffff, 26) << 2)
+    assert target == gen.sites['betop_effect_play'], hex(target)
+    fn = _fn(gen, 'betop_effect_play')
+    return ('{ extern void rt_betop_rumble_event(unsigned, const char *); '
+            'rt_betop_rumble_event((unsigned)LD32(c->x[19] + 0x90), '
+            '(const char *)(uintptr_t)LD64(c->x[21] + 16)); '
+            f'extern void {fn}(Cpu *); c->x[30] = {a + 4:#x}ull; {fn}(c); }}'
+            f'  /* {a:#x}: bl {target:#x} (accepted contact effect) */')
 
 
 def _vfr_ratio(gen, a):
@@ -767,6 +787,7 @@ PATCHES = {
     'yaz0_stream': _yaz0_stream,
     'yaz0_stream_ret': _yaz0_stream_ret,
     'vfr_ratio': _vfr_ratio,
+    'betop_effect_event': _betop_effect_event,
     'gui_speed': _gui_speed,
     'quick_menu_capture_alpha': _quick_menu_capture_alpha,
     'arrow_fall_gravity': _arrow_gravity,

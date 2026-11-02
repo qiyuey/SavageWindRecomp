@@ -55,7 +55,29 @@ BLADE_LATERAL = ('bd4207e0 bd420be1 1e298821 1f0d0402 1f2d0400 1e202048 1e20cc40
 TRAVERSE = ('b9400028 2f00e400 36600008/fff8001f d65f03c0 a9bf7bfd 910003fd 12000042 12000083 94000000/fc000000 '
             '90000008/9f00001f 91000108/ffc003ff f9400108 b4000008/ff00001f bd431101 52a85908 1e202008 1e270102 1e22cc00 '
             '1e210800 a8c17bfd 14000000/fc000000 1e2e1001')
+BETOP_EFFECT_PLAY = ('910023e1 aa1603e0 aa1403e2 94000000/fc000000 aa1403e0 aa1303e1 '
+                     '94000000/fc000000 aa1403e0 aa1303e1 94000000/fc000000')
+
+# Exact memory-layout proofs for the read-only Player action sampler.
+BETOP_STATE_BOW = 'a9be7bfd f9000bf3 910003fd 90000001/9f00001f 91000021/ffc003ff aa0003f3 94000000/fc000000 36000000/fff8001f f9400bf3 52800020 a8c27bfd d65f03c0 90000001/9f00001f 91000021/ffc003ff aa1303e0 94000000/fc000000 37000000/fff8001f 90000001/9f00001f 91000021/ffc003ff aa1303e0 94000000/fc000000 37000000/fff8001f aa1303e0 f9400bf3 90000001/9f00001f 91000021/ffc003ff a8c27bfd 14000000/fc000000 29402428'
+BETOP_STATE_UPPER = 'a9bd7bfd f9000bf5 a9024ff4 910003fd f942b000 aa0103f3 52800021 52800022 52800034 94000000/fc000000'
+BETOP_STATE_LOWER = 'a9be7bfd a9014ff4 910003fd f942b000 aa0103f3 2a1f03e1 2a1f03e2 94000000/fc000000 f9400008'
+BETOP_STATE_LIST = 'b940b808 6b01011f 5400000d/ff00001f f9406008 1a9f802a 52800a09 9b292149 b9402129 6b02013f 5400000d/ff00001f 93407d4a 52800a0b 9b2b2148 f9401508 b4000008/ff00001f 6b02013f 5280130a 1a9f8049 9b2a2120 14000000/fc000000 90000000/9f00001f 91000000/ffc003ff d65f03c0'
+BETOP_STATE_NAME = 'f9400c08 9000000a/9f00001f f100011f f9400009 f940014a/ffc003ff 91002129 9a890140 d65f03c0'
+BETOP_STATE_GUARD = '52847c08 8b080000 d65f03c0 52800600 d65f03c0 9130e000 d65f03c0 5284d608 8b080000 d65f03c0 bd60d000 d65f03c0 5284aa08 8b080000 d65f03c0 39710008 53041100 d65f03c0'
+
 SITES = [
+    Site('betop_state_bow', 'code', BETOP_STATE_BOW, 0),
+    Site('betop_state_upper', 'code', BETOP_STATE_UPPER, 0),
+    Site('betop_state_lower', 'code', BETOP_STATE_LOWER, 0),
+    Site('betop_state_list', 'code', BETOP_STATE_LIST, 0),
+    Site('betop_state_name', 'code', BETOP_STATE_NAME, 0),
+    Site('betop_state_guard', 'code', BETOP_STATE_GUARD, 15),
+
+    # Accepted named contact effect: resource lookup succeeded; x19 = event, x21 = actor.
+    # The callback observes RumbleType and filters the actor named Player; original playback stays intact.
+    Site('betop_effect_event', 'code', BETOP_EFFECT_PLAY, 3),
+    Site('betop_effect_play', 'call', BETOP_EFFECT_PLAY, 3),
     # The Options screen (tools/patches.py; runtime/ui/game_options.mm)
     Site('opt_create_rows', 'code', 'd10303ff a9067bfd a9076ffc a90867fa a9095ff8 a90a57f6 a90b4ff4 910183fd '
          '90000008/9f00001f b9400118/ffc003ff', 0),
@@ -287,6 +309,14 @@ OPTIONAL = {n for g in OPTIONAL_GROUPS for n in g}
 
 KNOWN = {
     '1.8.2': {
+        'betop_state_bow': 0x7000bcd19c,
+        'betop_state_upper': 0x7000b4f564,
+        'betop_state_lower': 0x7000b50f84,
+        'betop_state_list': 0x700138bee0,
+        'betop_state_name': 0x70013a6f5c,
+        'betop_state_guard': 0x7000bcca4c,
+        'betop_effect_event': 0x70010e2db8,
+        'betop_effect_play': 0x7000e30a30,
         'opt_create_rows': 0x7000d1bd78,
         'opt_row_init_flag_type': 0x7000d1c208,
         'gdt_flag_type': 0x7001023038,
@@ -346,6 +376,14 @@ KNOWN = {
         'main_end': 0x7001d37000,
     },
     '1.9.0': {
+        'betop_state_bow': 0x7000ce067c,
+        'betop_state_upper': 0x7000c62c74,
+        'betop_state_lower': 0x7000c64694,
+        'betop_state_list': 0x70014a0040,
+        'betop_state_name': 0x70014bb0bc,
+        'betop_state_guard': 0x7000cdff2c,
+        'betop_effect_event': 0x70011f6b48,
+        'betop_effect_play': 0x7000f44080,
         'yaz0_stream': 0x700131d674,
         'yaz0_stream_ret': 0x700131d7e8,
         'opt_create_rows': 0x7000e2f0a8,
@@ -666,6 +704,26 @@ def common_pattern(ma, a, mb, b, kind='code', shortest=8, longest=32):
     raise SiteError(f'no pattern inside both functions finds only {a:#x} and {b:#x}')
 
 
+def validate_betop_state(main, sites):
+    """The sampler must describe charge, not a similar reload/shoot predicate."""
+    if 'betop_state_bow' not in sites:
+        return
+    bow = sites['betop_state_bow']
+    for offset, expected in [(16, b'BowCharge'), (52, b'SquatBowCharge'),
+                             (72, b'WallBowChargeL'), (100, b'WallBowChargeR')]:
+        address = main.target('ref', bow + offset) - main.base
+        if address < 0 or bytes(main.nso.image[address:address + len(expected) + 1]) != expected + b'\0':
+            raise SiteError('betop_state_bow: charge animation identity changed')
+    calls = [(bow + 24, 'betop_state_upper'), (bow + 60, 'betop_state_upper'),
+             (bow + 80, 'betop_state_lower'), (bow + 108, 'betop_state_lower'),
+             (sites['betop_state_upper'] + 36, 'betop_state_list'),
+             (sites['betop_state_lower'] + 28, 'betop_state_list'),
+             (sites['betop_state_list'] + 76, 'betop_state_name')]
+    for address, target in calls:
+        if main.target('call', address) != sites[target]:
+            raise SiteError(f'betop_state: changed call from {address:#x} to {target}')
+
+
 def resolve(main, known=None, log=None):
     """{site name: address} for this main module. known: the addresses listed for its build (or None)."""
     out, problems = {}, []
@@ -674,6 +732,9 @@ def resolve(main, known=None, log=None):
             found, hits = main.locate(s)
         except SiteError as e:
             problems.append(f'{s.name}: {e}')
+            continue
+        if s.name.startswith('betop_state_') and found is None:
+            problems.append(f'{s.name}: action layout must match uniquely; refusing table fallback')
             continue
         k = (known or {}).get(s.name)
         if found is not None and k is not None and found != k:
@@ -688,6 +749,7 @@ def resolve(main, known=None, log=None):
         out[s.name] = found if found is not None else k
     if problems:
         raise SiteError('; '.join(problems))
+    validate_betop_state(main, out)
     for g in OPTIONAL_GROUPS:
         missing = [n for n in g if n not in out]
         if not missing:
