@@ -7,14 +7,17 @@
 // smaller by their quality mode's factor and scale up to the window. DLSS is listed as coming later.
 enum { UPSCALE_OFF = 0, UPSCALE_METALFX = 1 /* macOS */, UPSCALE_FSR1 = 2 /* AMD FSR 1, Vulkan */,
        UPSCALE_FSR3 = 3 /* AMD FSR 3.1, Vulkan where built in (vulkan/fsr3.h) */, UPSCALE_DLSS = 4 /* NVIDIA DLSS: not yet */,
+       UPSCALE_FSR4 = 5 /* AMD FSR 4, Vulkan on Windows with AMD's DLLs and an AMD Radeon (vulkan/fsr_api.h) */,
        UPSCALE_COUNT };
 #ifdef __APPLE__
 #define UPSCALE_SPATIAL UPSCALE_METALFX  // each OS's spatial upscaler
 #define UPSCALE_FSR3_OR_SPATIAL UPSCALE_METALFX  // (a settings file from another OS)
+#define UPSCALE_FSR4_OR_SPATIAL UPSCALE_METALFX
 #define UPSCALE_DEFAULT UPSCALE_METALFX  // (Metal has no internal resolution yet: MetalFX scales the image to the window)
 #else
 #define UPSCALE_SPATIAL UPSCALE_FSR1
 #define UPSCALE_FSR3_OR_SPATIAL UPSCALE_FSR3
+#define UPSCALE_FSR4_OR_SPATIAL UPSCALE_FSR4  // (without FSR 4 on this PC: vulkan/device.c moves it to FSR 3 or 1)
 #define UPSCALE_DEFAULT UPSCALE_OFF      // the 3D image at the window's resolution
 #endif
 // quality modes, AMD's scale factors (per axis): Ultra Quality 1.3, Quality 1.5, Balanced 1.7, Performance 2.0,
@@ -61,6 +64,7 @@ typedef struct {
     int upscaler;        // UPSCALE_*: Off (render at the window's size), or render smaller and scale up
     int upscale_quality; // UPQ_*: the upscaler's mode (how much smaller it renders)
     int antialias;       // AA_*: anti-aliasing of the game image before it is scaled to the window
+    bool game_fxaa;      // the game's own FXAA, in its scene -> final image composite (vulkan/exec.c fxaa_patch)
     int anisotropy;      // texture filtering: 0 the game's own, 1..4 = 2x, 4x, 8x, 16x (vulkan/textures.c)
     int sharpening;      // AMD CAS sharpening of the 3D image, 0 (off) .. 10 (100%) (vulkan/exec.c scene_post)
     bool frame_gen;      // AMD FSR 3 frame generation: a frame made between each two the game draws (vulkan/framegen.cpp)

@@ -31,6 +31,7 @@ Settings g_settings = {
     .damage_dealt = 100,
     .upscaler = UPSCALE_DEFAULT,  // (Off: the window's resolution; MetalFX on macOS)
     .upscale_quality = UPQ_QUALITY,
+    .game_fxaa = true,
     .mouse_camera = true,
     .pc_cursor = true,
     .mouse_sens = MOUSE_SENS_DEFAULT,
@@ -136,10 +137,11 @@ void settings_load(void) {
         }
         else if (!strcmp(key, "settings_version")) version = atoi(val);
         else if (!strcmp(key, "resolution")) snprintf(old_res, sizeof old_res, "%s", val);  // (version 1)
-        else if (!strcmp(key, "upscaler"))  // (metalfx / fsr1: this OS's spatial upscaler; fsr3: Vulkan, held back
-            // for now: FSR 1 with the same quality mode, nvn/output_scale.c fsr3_upscaler_enabled; dlss: not yet)
+        else if (!strcmp(key, "upscaler"))  // (metalfx / fsr1: this OS's spatial upscaler; fsr3, fsr4: Vulkan, held
+            // back for now: FSR 1 with the same quality mode, nvn/output_scale.c fsr3_upscaler_enabled; dlss: not yet)
             g_settings.upscaler = !strcmp(val, "fsr1") || !strcmp(val, "metalfx") ? UPSCALE_SPATIAL
                                 : !strcmp(val, "fsr3") ? (fsr3_upscaler_enabled() ? UPSCALE_FSR3_OR_SPATIAL : UPSCALE_SPATIAL)
+                                : !strcmp(val, "fsr4") ? (fsr3_upscaler_enabled() ? UPSCALE_FSR4_OR_SPATIAL : UPSCALE_SPATIAL)
                                                        : UPSCALE_OFF;
         else if (!strcmp(key, "upscaler_quality")) {
             for (int i = 0; i < UPQ_COUNT; i++)
@@ -156,6 +158,7 @@ void settings_load(void) {
             int a = atoi(val);
             g_settings.anisotropy = a >= 16 ? 4 : a >= 8 ? 3 : a >= 4 ? 2 : a >= 2 ? 1 : 0;
         }
+        else if (!strcmp(key, "game_fxaa")) g_settings.game_fxaa = atoi(val) != 0;
         else if (!strcmp(key, "frame_generation")) g_settings.frame_gen = atoi(val) != 0;
         else if (!strcmp(key, "sharpening")) {  // (percent, in steps of 10)
             int p = atoi(val);
@@ -324,11 +327,12 @@ void settings_save(void) {
     fprintf(f, "reverb = %d\n", g_settings.reverb);
     fprintf(f, "movie_audio = %d\n", g_settings.movie_audio);
     fprintf(f, "perf_overlay = %s\n", g_settings.perf_overlay == PERF_FULL ? "full" : g_settings.perf_overlay == PERF_FPS ? "fps" : "off");
-    static const char *const ups[UPSCALE_COUNT] = {"off", "metalfx", "fsr1", "fsr3", "dlss"};
+    static const char *const ups[UPSCALE_COUNT] = {"off", "metalfx", "fsr1", "fsr3", "dlss", "fsr4"};
     int u = g_settings.upscaler, uq = g_settings.upscale_quality;
     fprintf(f, "upscaler = %s\n", u >= 0 && u < UPSCALE_COUNT ? ups[u] : "off");
     fprintf(f, "upscaler_quality = %s\n", k_quality[uq >= 0 && uq < UPQ_COUNT ? uq : UPQ_QUALITY]);
     fprintf(f, "antialias = %s\n", g_settings.antialias == AA_TAA ? "taa" : g_settings.antialias == AA_SMAA ? "smaa" : "off");
+    fprintf(f, "game_fxaa = %d\n", g_settings.game_fxaa ? 1 : 0);
     int an = g_settings.anisotropy;
     if (an >= 1 && an <= 4) fprintf(f, "anisotropy = %dx\n", 1 << an);
     else fprintf(f, "anisotropy = game\n");

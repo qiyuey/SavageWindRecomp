@@ -42,6 +42,7 @@ typedef struct {
     VkCommandPool pool;        // render thread only
     bool custom_border, divisor, host_import, memory_budget, memory_priority, pageable_device_local_memory, sparse_queue, sparse_buffer,
         sparse_nonresident_strict, sparse_host_import, wide_lines;
+    bool calibrated;  // VK_EXT_calibrated_timestamps (the profiler aligns GPU timestamps to the CPU clock)
     bool nv_checkpoints;  // VK_NV_device_diagnostic_checkpoints: where the GPU was when it was lost (exec.c ck_mark)
     bool feat_aniso;  // samplerAnisotropy (Video > Anisotropic filtering)
     bool storage_ext;  // shaderStorageImageExtendedFormats (TAA's R8 / R16F / RG16F storage images: exec.c mvec_taa)
@@ -53,6 +54,7 @@ typedef struct {
     bool gpl;                  // graphics pipeline libraries with fast linking (exec.c)
     bool dmabuf;               // memory exported as dma-bufs (Linux: the guest heap, exec.c backend_heap_set)
     bool radv;                 // the driver is Mesa's RADV
+    bool turnip;               // the driver is Mesa's Turnip (Qualcomm Adreno; exec.c ubo_dynamic_mark_stage)
     bool amd_proprietary;      // the driver is AMD's own (Windows; textures.c's cube-compatible rule, #59)
     bool present_wait;         // VK_KHR_present_id + present_wait on (SAVAGEWIND_LOG_PRESENT: when frames are shown)
     bool fp16;                 // shaderFloat16 + 16-bit storage on (the FSR 3 upscaler's 16-bit shaders: fsr3.cpp)
@@ -113,6 +115,7 @@ typedef struct TexBackend {
     uint8_t nview_fmt;
     uint64_t data_hash, sample_hash, checked_frame, full_frame;
     bool scalable, presented;
+    bool native_post;           // shader-identified bloom target: never inherit a scene scale
     uint8_t rs_group;            // RS_*: which output scale its allocation follows (textures.c)
     uint32_t guest_w;            // (RS_SHADOW: the guest width its scale is worked out from)
     uint64_t touched_frame, frame_cleared;
@@ -173,6 +176,7 @@ void vk_defer_image(VkImage img, VmaAllocation mem);
 void vk_defer_view(VkImageView v);
 void vk_views_forget(TexBackend *b);  // drop (deferred) the cached views of an image being replaced
 void vk_make_scalable_like(NvnTexture *t, NvnTexture *like);  // a pass's attachments share one scale
+bool vk_native_post_target(NvnTexture *t);  // before its first write; contents may be discarded
 uint8_t vk_texture_scale_group(NvnTexture *t);
 bool vk_is_shadow_copy(const NvnTexture *t);  // the sun cascades' half-size R16 copy (textures.c)
 bool vk_shadow_direct(void);                  // its readers compare against the cascades (SAVAGEWIND_NO_SHADOW_DIRECT=1: off)
