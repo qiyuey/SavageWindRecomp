@@ -624,6 +624,10 @@ void build_items(void) {
                        },
                        [](const Item &) { return (g_settings.rumble_strength + 2) / 5; },
                        [](const Item &, int x) { g_settings.rumble_strength = x * 5; }, RUMBLE_STRENGTH_DEFAULT / 5));
+    v.push_back(toggle(P_CONTROLS, "Free camera with both sticks",
+                       "Clicking both sticks together turns the free camera on and off. Home on the keyboard always does.",
+                       [](const Item &) { return (int)g_settings.freecam_sticks; },
+                       [](const Item &, int x) { g_settings.freecam_sticks = x; }, 1));
     v.push_back(toggle(P_CONTROLS, "D-pad as left stick", "The d-pad also moves like the left stick.",
                        [](const Item &) { return (int)g_settings.dpad_move; },
                        [](const Item &, int x) { g_settings.dpad_move = x; }, 0));

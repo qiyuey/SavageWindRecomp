@@ -1097,6 +1097,8 @@ static void tab_about(void) {
     if (opt_slider("Rumble strength", &rumble_strength, 0, 100, 5, RUMBLE_STRENGTH_DEFAULT, "%g%%",
                    "0%: off. 10%: original strength. 50%: 5x. 100%: 10x, limited to full output."))
         g_settings.rumble_strength = (int)lroundf(rumble_strength);
+    opt_toggle("Free camera with both sticks", &g_settings.freecam_sticks, true,
+               "Clicking both sticks together turns the free camera on and off. Home on the keyboard always does.");
     controls_bindings_draw(ImGui::GetFontSize() / 34);
     ImGui::Spacing();
     header("Menu");

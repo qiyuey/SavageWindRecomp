@@ -76,6 +76,7 @@ typedef struct {
     int vsync;           // VSYNC_*
     bool rumble;         // controller vibration
     int rumble_strength; // 0..100%, base gain 10; default 50 (original amplitude x5)
+    bool freecam_sticks; // both stick clicks together turn the free camera on and off (hle/input.c)
     int gpu;             // Vulkan adapter index from the startup log; -1: automatic (restart required)
     bool dpad_move;      // the d-pad (and arrow keys) also act as the left stick while it is at rest
     float stick_deadzone[2];  // left, right stick: a controller's stick reads 0 within this much of full tilt (radial)
