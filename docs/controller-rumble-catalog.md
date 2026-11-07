@@ -31,7 +31,7 @@ Outputs are in ignored `build/rumble-catalog/`:
 - `resources.json`: archive coverage, duplicates, AI definitions and flow/timeline calls.
 - `backtest-results.jsonl`: selected effects and software timing (older records may retain user feedback).
 
-Do not stage these files. `Rumble-Catalog.cmd` in the local build directory starts the GUI. Search by name, source or ID, select an effect, inspect its curve and source, then press Play. Escape, Stop, focus loss and closing request silence. The player never starts vibration just because a row is selected.
+Do not stage these files. The `rumble_catalog_player.py` command above starts the GUI. Search by name, source or ID, select an effect, inspect its curve and source, then press Play. Escape, Stop, focus loss and closing request silence. The player never starts vibration just because a row is selected.
 
 The GUI uses Chinese names and explanatory text. Verified native call contexts
 label small/middle damage, reverse cuts, large damage and perfect-guard hits;

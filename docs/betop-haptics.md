@@ -48,8 +48,9 @@ coordinates other copies of this SDL implementation, not the official assistant.
 Use the modified sibling SDL3 checkout and the normal Windows build guide.
 The app imports `SDL_SetGamepadBetopEffects`; a stock SDL3 DLL cannot supply it.
 Keep the matching `SDL3.dll` beside `build/savagewind.exe`.
-`Play.cmd` starts that build with this checkout as its data directory, so opening
-it from Explorer uses the existing extracted files, settings and saves here.
+For normal play, open `build/savagewind.exe` directly in Explorer. It uses the
+extracted files, settings and saves in `build/`. From a terminal, start it from
+that directory and pass any custom launch arguments to the executable.
 
 Regenerate the current game's `main` with `tools/gen.py` after changing the
 event hook, then rebuild the runtime and game library. Do not edit generated C.
