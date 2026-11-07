@@ -685,4 +685,3 @@ T("The game's own edge smoothing. Off: sharper, more jagged edges.", "El suaviza
 T("The game's own FXAA, which smooths edges as the 3D image is drawn into the final picture, as on the console. Off: a sharper image with more jagged edges; use it to replace FXAA with SMAA or TAA above, or to keep the image crisp at a high resolution.", "El FXAA del propio juego, que suaviza los bordes al dibujar la imagen 3D en la imagen final, como en la consola. Desactivado: una imagen más nítida con bordes más dentados; úsalo para cambiar el FXAA por SMAA o TAA (arriba) o para mantener la imagen nítida a alta resolución.")
 T("Rumble strength", "Intensidad de vibración")
 T("0%: off. 20%: original strength. 50%: 2.5x. 100%: 5x, limited to full output.", "0%: desactivada. 20%: intensidad original. 50%: 2.5 veces. 100%: 5 veces, limitada a la salida máxima.")
-T("Shaders %llu(%d) | Pipelines %llu(%d)", "Sombreadores %llu(%d) | Canalizaciones %llu(%d)")

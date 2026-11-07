@@ -686,4 +686,3 @@ T("The game's own edge smoothing. Off: sharper, more jagged edges.", "Die Kanten
 T("The game's own FXAA, which smooths edges as the 3D image is drawn into the final picture, as on the console. Off: a sharper image with more jagged edges; use it to replace FXAA with SMAA or TAA above, or to keep the image crisp at a high resolution.", "Das FXAA des Spiels, das Kanten glättet, während das 3D-Bild ins Endbild gezeichnet wird, wie auf der Konsole. Aus: ein schärferes Bild mit kantigeren Rändern; damit lässt sich FXAA oben durch SMAA oder TAA ersetzen oder das Bild bei hoher Auflösung knackig halten.")
 T("Rumble strength", "Vibrationsstärke")
 T("0%: off. 20%: original strength. 50%: 2.5x. 100%: 5x, limited to full output.", "0%: aus. 20%: ursprüngliche Stärke. 50%: 2.5-fach. 100%: 5-fach, auf die maximale Ausgabe begrenzt.")
-T("Shaders %llu(%d) | Pipelines %llu(%d)", "Shader %llu(%d) | Pipelines %llu(%d)")

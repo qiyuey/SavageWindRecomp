@@ -1,4 +1,3 @@
-#include "../../perfmon.h"
 // Vulkan device, window, swapchain and presentation (counterpart of the window/present half of metal.m).
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
@@ -1449,9 +1448,7 @@ static bool hdr_pipeline(VkFormat fmt) {
                                            .pStages = st, .pVertexInputState = &vi, .pInputAssemblyState = &ia,
                                            .pViewportState = &vp, .pRasterizationState = &rs, .pMultisampleState = &ms,
                                            .pColorBlendState = &cb, .pDynamicState = &ds, .layout = hdr_layout};
-        perf_build_begin(PERF_BUILD_PIPE);
         if (vkCreateGraphicsPipelines(g_vk.dev, VK_NULL_HANDLE, 1, &gi, NULL, &hdr_pipe) != VK_SUCCESS) hdr_pipe = VK_NULL_HANDLE;
-        perf_build_end(PERF_BUILD_PIPE);
     }
     if (vs) vkDestroyShaderModule(g_vk.dev, vs, NULL);
     if (fs) vkDestroyShaderModule(g_vk.dev, fs, NULL);

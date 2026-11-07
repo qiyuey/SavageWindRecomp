@@ -684,8 +684,6 @@ T("Makes the game's letters sharper on 1440p and 4K screens. It takes effect the
 
 T("Rumble strength", "震動強度")
 T("0%: off. 20%: original strength. 50%: 2.5x. 100%: 5x, limited to full output.", "0%：關閉；20%：原始強度；50%：2.5倍；100%：5倍，超出時限制到滿幅。")
-
-T("Shaders %llu(%d) | Pipelines %llu(%d)", "著色器 %llu(%d)次 | 管線 %llu(%d)次")
 T("Game's FXAA", "遊戲內建 FXAA")
 T("The game's own edge smoothing. Off: sharper, more jagged edges.", "遊戲內建的邊緣平滑。關閉：更銳利，但邊緣鋸齒更多。")
 T("The game's own FXAA, which smooths edges as the 3D image is drawn into the final picture, as on the console. Off: a sharper image with more jagged edges; use it to replace FXAA with SMAA or TAA above, or to keep the image crisp at a high resolution.", "遊戲內建的 FXAA，在把 3D 畫面繪製到最終畫面時平滑邊緣，與主機上相同。關閉：畫面更銳利，但邊緣鋸齒更多；可用於以上方的 SMAA 或 TAA 取代 FXAA，或在高解析度下保持畫面清晰。")

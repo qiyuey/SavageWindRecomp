@@ -31,21 +31,6 @@
 
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static PerfStats g_stats;
-static int build_active[PERF_BUILD_N];
-static uint64_t build_last_end_ns[PERF_BUILD_N];
-static uint64_t build_finished[PERF_BUILD_N];
-void perf_build_begin(int kind) {
-    __atomic_add_fetch(&build_active[kind], 1, __ATOMIC_RELAXED);
-}
-void perf_build_end(int kind) {
-    __atomic_add_fetch(&build_finished[kind], 1, __ATOMIC_RELAXED);
-    uint64_t now = plat_now_ns();
-    uint64_t prev = __atomic_load_n(&build_last_end_ns[kind], __ATOMIC_RELAXED);
-    // Workers can finish out of order; never move the last activity backwards.
-    while (prev < now && !__atomic_compare_exchange_n(&build_last_end_ns[kind], &prev, now,
-                                                     false, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {}
-    __atomic_sub_fetch(&build_active[kind], 1, __ATOMIC_RELAXED);
-}
 static char g_gpu_hint[96];
 #ifdef __linux__
 static int g_gpu_drm_major = -1, g_gpu_drm_minor = -1;  // protected by g_lock, like the name
@@ -635,10 +620,5 @@ void perfmon_snapshot(PerfStats *out) {
     pthread_mutex_lock(&g_lock);
     frames_summary(&g_stats);
     *out = g_stats;
-    for (int i = 0; i < PERF_BUILD_N; i++) {
-        out->build_active[i] = __atomic_load_n(&build_active[i], __ATOMIC_RELAXED);
-        out->build_last_end_ns[i] = __atomic_load_n(&build_last_end_ns[i], __ATOMIC_RELAXED);
-        out->build_finished[i] = __atomic_load_n(&build_finished[i], __ATOMIC_RELAXED);
-    }
     pthread_mutex_unlock(&g_lock);
 }

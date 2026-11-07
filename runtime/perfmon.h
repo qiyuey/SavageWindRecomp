@@ -24,13 +24,7 @@ typedef struct {
     // GPU (NVIDIA through NVML, AMD through sysfs on Linux)
     char gpu_name[96];
     float gpu_pct, gpu_temp_c, gpu_power_w, gpu_clock_mhz, vram_used_mb, vram_total_mb;
-    int build_active[2];                      // shader compilation, driver pipeline creation
-    uint64_t build_last_end_ns[2];            // latest completed attempt (monotonic clock), including failures
-    uint64_t build_finished[2];               // process-lifetime completed operations, including failures and cache lookups
 } PerfStats;
-enum { PERF_BUILD_SHADER, PERF_BUILD_PIPE, PERF_BUILD_N };
-void perf_build_begin(int kind);
-void perf_build_end(int kind);
 
 void perfmon_frame(void);                  // a game frame was presented (any thread)
 void perfmon_generated_frame(void);        // a generated frame was presented (vulkan/device.c)

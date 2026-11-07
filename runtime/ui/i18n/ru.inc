@@ -686,4 +686,3 @@ T("The game's own edge smoothing. Off: sharper, more jagged edges.", "Собст
 T("The game's own FXAA, which smooths edges as the 3D image is drawn into the final picture, as on the console. Off: a sharper image with more jagged edges; use it to replace FXAA with SMAA or TAA above, or to keep the image crisp at a high resolution.", "Собственное FXAA игры, которое сглаживает края, когда 3D-изображение рисуется в итоговую картинку, как на консоли. Выкл.: более чёткое изображение с более зубчатыми краями; используйте, чтобы заменить FXAA на SMAA или TAA выше, или чтобы сохранить чёткость при высоком разрешении.")
 T("Rumble strength", "Сила вибрации")
 T("0%: off. 20%: original strength. 50%: 2.5x. 100%: 5x, limited to full output.", "0%: выкл. 20%: исходная сила. 50%: в 2.5 раз. 100%: в 5 раз, с ограничением до максимальной мощности.")
-T("Shaders %llu(%d) | Pipelines %llu(%d)", "Шейдеры %llu(%d) | Конвейеры %llu(%d)")

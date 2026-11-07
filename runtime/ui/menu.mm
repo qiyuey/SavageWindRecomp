@@ -1126,13 +1126,6 @@ static void perf_cell(const char *fmt, float v) {
     if (v < 0) ImGui::TextDisabled("-");
     else ImGui::Text(fmt, v);
 }
-// Completed operations and in-flight work share one stable row.
-static void perf_build_draw(const PerfStats &s) {
-    ImGui::Text(tr("Shaders %llu(%d) | Pipelines %llu(%d)"),
-                (unsigned long long)s.build_finished[PERF_BUILD_SHADER], s.build_active[PERF_BUILD_SHADER],
-                (unsigned long long)s.build_finished[PERF_BUILD_PIPE], s.build_active[PERF_BUILD_PIPE]);
-}
-
 static void perf_overlay_draw(ImGuiIO &io, float scale) {
     PerfStats s;
     perfmon_snapshot(&s);
@@ -1147,7 +1140,6 @@ static void perf_overlay_draw(ImGuiIO &io, float scale) {
     if (g_settings.perf_overlay == PERF_FPS) {
         // (frame generation: the presented frames, generated ones included)
         ImGui::TextColored(fps_c, "%.0f FPS  %.1f ms", s.fps + s.fps_generated, s.frame_ms_avg);
-        perf_build_draw(s);
         ImGui::End();
         return;
     }
@@ -1168,7 +1160,6 @@ static void perf_overlay_draw(ImGuiIO &io, float scale) {
     }
     float top = s.frame_ms_max > 50 ? s.frame_ms_max : 50;
     ImGui::PlotLines("##ft", s.frame_ms, PERF_HISTORY, 0, NULL, 0, top, ImVec2(330 * scale, 48 * scale));
-    perf_build_draw(s);
     ImGui::TextDisabled("%s", s.gpu_name[0] ? s.gpu_name : tr("GPU: no NVML / sysfs data"));
     ImGui::TextDisabled("%s", s.cpu_name);
     // the graphics settings in effect: what the game falls back to (FSR 3 not built in, a mode that isn't offered), not

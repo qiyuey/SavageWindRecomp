@@ -686,4 +686,3 @@ T("The game's own edge smoothing. Off: sharper, more jagged edges.", "การ�
 T("The game's own FXAA, which smooths edges as the 3D image is drawn into the final picture, as on the console. Off: a sharper image with more jagged edges; use it to replace FXAA with SMAA or TAA above, or to keep the image crisp at a high resolution.", "FXAA ของเกมเอง ซึ่งทำให้ขอบเรียบขึ้นขณะวาดภาพ 3D ลงในภาพสุดท้าย เหมือนบนเครื่องคอนโซล ปิด: ภาพคมขึ้นแต่ขอบหยักมากขึ้น ใช้เมื่อต้องการแทน FXAA ด้วย SMAA หรือ TAA ด้านบน หรือเพื่อให้ภาพคมชัดที่ความละเอียดสูง")
 T("Rumble strength", "ความแรงของการสั่น")
 T("0%: off. 20%: original strength. 50%: 2.5x. 100%: 5x, limited to full output.", "0%: ปิด 20%: ความแรงเดิม 50%: 2.5 เท่า 100%: 5 เท่า โดยจำกัดไม่ให้เกินกำลังสูงสุด")
-T("Shaders %llu(%d) | Pipelines %llu(%d)", "เชเดอร์ %llu(%d) | ไปป์ไลน์ %llu(%d)")

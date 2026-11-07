@@ -686,4 +686,3 @@ T("The game's own edge smoothing. Off: sharper, more jagged edges.", "ゲーム�
 T("The game's own FXAA, which smooths edges as the 3D image is drawn into the final picture, as on the console. Off: a sharper image with more jagged edges; use it to replace FXAA with SMAA or TAA above, or to keep the image crisp at a high resolution.", "ゲーム本来のFXAAです。3D画像を最終画面に描くときに輪郭を滑らかにします（本体と同じ）。オフ: よりシャープな画像になり、輪郭のギザギザが増えます。上のSMAAやTAAに置き換えるときや、高解像度で画像をくっきり保ちたいときに使います。")
 T("Rumble strength", "振動の強さ")
 T("0%: off. 20%: original strength. 50%: 2.5x. 100%: 5x, limited to full output.", "0%：オフ。20%：元の強さ。50%：2.5倍。100%：5倍（最大出力までに制限）。")
-T("Shaders %llu(%d) | Pipelines %llu(%d)", "シェーダー %llu(%d) | パイプライン %llu(%d)")
