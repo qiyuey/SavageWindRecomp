@@ -47,6 +47,7 @@ typedef struct {
     bool nv_checkpoints;  // VK_NV_device_diagnostic_checkpoints: where the GPU was when it was lost (exec.c ck_mark)
     bool feat_aniso;  // samplerAnisotropy (Video > Anisotropic filtering)
     bool storage_ext;  // shaderStorageImageExtendedFormats (TAA's R8 / R16F / RG16F storage images: exec.c mvec_taa)
+    bool storage_write_unformatted;  // NVN formatted surface stores select the format through the view
     bool depth_clamp;          // depthClamp feature (nvnCommandBufferSetDepthClamp: shadow maps keep occluders before the near plane)
     bool occlusion_precise;    // occlusionQueryPrecise: SAMPLES_PASSED counts samples, not just "any"
     bool feedback_loop;        // attachment feedback loops + barriers inside dynamic rendering (exec.c)
@@ -112,6 +113,9 @@ typedef struct TexBackend {
     bool feedback_ok;        // made with VK_IMAGE_USAGE_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT (sampled while it is rendered to)
     bool feedback_seen;      // a draw sampled it while writing it: its passes begin with the feedback loop enabled
     bool in_feedback_layout; // in ATTACHMENT_FEEDBACK_LOOP_OPTIMAL now (g_vk.feedback_layout: a pass that loops, exec.c)
+    bool surface_alias;     // needs a raw integer view outside the usual render-target format list
+    bool surface_storage;   // needs storage-image usage on creation
+    bool storage_ok;        // the allocated image has storage-image usage
     VkFormat view_fmt[2];    // (g_vk.lean_usage) the only formats its views may have; nview_fmt 0: any compatible one
     uint8_t nview_fmt;
     uint64_t data_hash, sample_hash, checked_frame, full_frame;
@@ -164,6 +168,7 @@ VkFormat vk_format(uint32_t nvn_format);
 bool vk_format_alpha_one(uint32_t nvn_format);
 // View of t (optionally through an NVN texture view) for rendering or sampling.
 VkImageView vk_view(NvnTexture *t, const NvnTextureView *v, bool has_view, bool render, int want_textype);
+VkImageView vk_surface_view(NvnTexture *t, const NvnTextureView *v, bool one_d, bool write, bool atomic, uint32_t *bpp);
 VkComponentMapping vk_sample_swizzle(NvnTexture *t, const NvnTextureView *v);  // (a colour texture's, sampled)
 VkImageView vk_image_view(TexBackend *b, VkImageViewType type, VkFormat fmt, uint32_t lv0, uint32_t nlv, uint32_t ly0,
                           uint32_t nly, VkComponentMapping sw, VkImageAspectFlags aspect);

@@ -95,6 +95,7 @@ typedef struct {
     // (cb3..cb16) read from the motion history (ph, at the push constants' pb offsets), the outputs to locals
     bool rw_prev;
     bool uses_gather;  // (GLSL) a gather: the GATHER_BIAS specialization constant is declared
+    uint64_t tex_level_queries;  // (GLSL) TXQ needs the final sampler type to query levels
 } Ctx;
 
 static uint64_t bits(uint64_t w, int lo, int n) { return (w >> lo) & ((n == 64) ? ~0ull : ((1ull << n) - 1)); }
@@ -751,6 +752,8 @@ static bool glsl_texs(Ctx *c, uint64_t w, bool fetch, int *slot_out, char *call,
             sprintf(call, "texelFetch(t%d, ivec2(%s), 0)", slot, RSC2(c, slot, "uint2(int2(%s, %s) + int2(int(%s << 28) >> 28, int(%s << 24) >> 28))", A, A1, Bv, Bv)); break;
         case 5: slot = tex_slot(c, index, TEXTYPE_2D, false, false);
             sprintf(call, "texelFetch(t%d, ivec2(%s), int(%s))", slot, RSC2(c, slot, "uint2(%s, %s)", A, A1), Bv); break;
+        case 6: slot = tex_slot(c, index, TEXTYPE_2D_MS, false, false);  // TLDS.LZ.MZ: B selects the sample
+            sprintf(call, "texelFetch(t%d, ivec2(%s), int(%s))", slot, RSC2(c, slot, "uint2(%s, %s)", A, A1), Bv); break;
         case 7: slot = tex_slot(c, index, TEXTYPE_3D, false, false);
             sprintf(call, "texelFetch(t%d, ivec3(%s, %s, %s), 0)", slot, A, A1, Bv); break;
         case 8: slot = tex_slot(c, index, TEXTYPE_2D_ARRAY, false, true);
@@ -1130,6 +1133,54 @@ static void emit_tex(Ctx *c, uint64_t w, uint32_t pc, bool bindless) {
 }
 
 // ------------------------------------------------------------------ instruction translation
+static void emit_surface(Ctx *c, uint64_t w, bool store) {
+    const unsigned handle = (unsigned)bits(w, 36, 13) * 4;
+    const unsigned dim = (unsigned)bits(w, 33, 3);
+    const unsigned field = (unsigned)bits(w, 20, 4);
+    const bool raw = bits(w, 52, 1);
+    const int coord = (int)bits(w, 8, 8), data = (int)bits(w, 0, 8);
+    // NVN's bound images start at c2[0x120], with an eight-byte handle per slot.
+    if (!c->glsl || c->stage != STAGE_COMPUTE || !bits(w, 51, 1) ||
+        handle < 0x120 || handle >= 0x120 + 8 * SURFACE_SLOTS || (handle & 7) ||
+        bits(w, 49, 2) != 0 || (dim == 3 && coord == RZ) ||
+        (store ? raw || dim != 3 || field != 15 || data > RZ - 3
+               : !raw || (dim != 0 && dim != 3) || field != 4)) {
+        fail(c, "unsupported %s surface mode", store ? "SUST" : "SULD");
+        return;
+    }
+    const unsigned slot = (handle - 0x120) / 8;
+    const unsigned bit = 1u << slot;
+    if (store) {
+        c->info->surface_store |= bit;
+        sp(&c->body, "    surface_write%u(ivec2(int(%s), int(%s)), uvec4(%s, %s, %s, %s));\n",
+           slot, R(coord), R(coord + 1), R(data), R(data + 1), R(data + 2), R(data + 3));
+    } else {
+        if (dim == 3) c->info->surface_load_2d |= bit;
+        else c->info->surface_load_1d |= bit;
+        char value[96];
+        snprintf(value, sizeof value, "surface_read%u(%s, int(%s))", slot, R(coord), dim == 3 ? R(coord + 1) : "0");
+        set_reg(c, data, value);
+    }
+}
+
+static void emit_surface_atomic(Ctx *c, uint64_t w) {
+    const unsigned handle = (unsigned)bits(w, 36, 13) * 4;
+    // SUATOM.D.ADD on a bound 1D 32-bit image, with sample coordinates (BA clear).
+    if (!c->glsl || c->stage != STAGE_COMPUTE || handle < 0x120 || handle >= 0x120 + 8 * SURFACE_SLOTS ||
+        (handle & 7) || bits(w, 28, 8) || bits(w, 49, 2) || bits(w, 51, 3) > 1) {
+        fail(c, "unsupported SUATOM surface mode");
+        return;
+    }
+    unsigned slot = (handle - 0x120) / 8;
+    c->info->surface_atomic |= 1u << slot;
+    int dest = (int)bits(w, 0, 8);
+    char value[96];
+    snprintf(value, sizeof value, "surface_add%u(%s, %s)", slot, R(bits(w, 8, 8)), R(bits(w, 20, 8)));
+    // Even when the old value is discarded, the atomic still writes the image.
+    if (dest == RZ) sp(&c->body, "    %s;\n", value);
+    else set_reg(c, dest, value);
+}
+
 static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
     char t[2048], u[2048];
     int d = (int)bits(w, 0, 8), a = (int)bits(w, 8, 8);
@@ -1260,8 +1311,9 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         int slot = tex_slot(c, index, -1, false, false);  // the type comes from a sample, if any
         if (qt == 1 && c->glsl) {  // tsize<slot>() is emitted with the slot's final type
             c->uses_rscale = true;
+            c->tex_level_queries |= 1ull << slot;
             sp(&c->body, "    { uint lv = %s; uvec4 q = uvec4(uint(floor(float(tsize%d(int(lv)).x) / rscale[%d].x + 0.5f)), "
-               "uint(floor(float(tsize%d(int(lv)).y) / rscale[%d].y + 0.5f)), 1u, uint(textureQueryLevels(t%d)));\n",
+               "uint(floor(float(tsize%d(int(lv)).y) / rscale[%d].y + 0.5f)), 1u, tlevels%d());\n",
                R(a), slot, slot + 1, slot, slot + 1, slot);
             int n = 0;
             for (int i = 0; i < 4; i++)
@@ -1955,6 +2007,12 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         sp(&c->body, "    }\n");
     } else if (OPM(0x5098000000000000ull, 0xfff8000000000000ull)) {  // CSET
         fail(c, "cset");
+    } else if (OPM(0xeb00000000000000ull, 0xffe0000000000000ull)) {  // SULD
+        emit_surface(c, w, false);
+    } else if (OPM(0xeb20000000000000ull, 0xffe0000000000000ull)) {  // SUST
+        emit_surface(c, w, true);
+    } else if (OPM(0xea00000000000000ull, 0xffc0000000000000ull)) {  // SUATOM.D
+        emit_surface_atomic(c, w);
     } else if (OPM(0xf0a8000000000000ull, 0xfff8000000000000ull)) {  // BAR
         if (!c->glsl) sp(&c->body, "    threadgroup_barrier(mem_flags::mem_threadgroup);\n");
         else if (c->stage == STAGE_COMPUTE) sp(&c->body, "    barrier();\n");
@@ -2180,12 +2238,75 @@ static char *glsl_with_prelude(const char *rest) {
 }
 
 static const char *glsl_sampler_type(const ShaderTexture *t) {
+    if (t->type == TEXTYPE_2D_MS) return "sampler2DMS";
     static const char *const names[][2] = {
         {"sampler1D", "sampler1DShadow"}, {"sampler2D", "sampler2DShadow"}, {"sampler3D", "sampler3D"},
         {"samplerCube", "samplerCubeShadow"}, {"sampler2DArray", "sampler2DArrayShadow"},
         {"samplerCubeArray", "samplerCubeArrayShadow"}, {"sampler1DArray", "sampler1DArrayShadow"}};
     int ty = t->type <= TEXTYPE_1D_ARRAY ? t->type : TEXTYPE_2D;
     return names[ty][t->shadow ? 1 : 0];
+}
+
+static void glsl_surfaces(Ctx *c, Str *s) {
+    unsigned one = c->info->surface_load_1d, two = c->info->surface_load_2d, stores = c->info->surface_store;
+    unsigned atomics = c->info->surface_atomic;
+    if (!(one | two | stores | atomics)) return;
+    sp(s, "layout(std140, set = 0, binding = %d) uniform SurfaceInfo { uvec4 surface_meta[%d]; };\n",
+       SURFACE_INFO_BINDING, SURFACE_SLOTS);
+    for (int i = 0; i < SURFACE_SLOTS; i++) {
+        unsigned bit = 1u << i;
+        if (atomics & bit) {
+            sp(s, "layout(r32ui, set = 0, binding = %d) uniform coherent uimage1D surface_atom%d;\n"
+                  "uint surface_add%d(uint p, uint data) {\n"
+                  "  if (p >= uint(imageSize(surface_atom%d))) return 0u;\n"
+                  "  return imageAtomicAdd(surface_atom%d, int(p), data);\n"
+                  "}\n", SURFACE_WRITE_BINDING + i, i, i, i, i);
+            if (one & bit)
+                sp(s, "uint surface_read%d(uint address, int y) {\n"
+                      "  uint x = address >> 2u;\n"
+                      "  if ((address & 3u) != 0u || x >= uint(imageSize(surface_atom%d))) return 0u;\n"
+                      "  return imageLoad(surface_atom%d, int(x)).x;\n"
+                      "}\n", i, i, i);
+        } else if ((one | two) & bit) {
+            bool is_2d = two & bit;
+            sp(s, "layout(set = 0, binding = %d) uniform usampler%s surface_in%d;\n", SURFACE_READ_BINDING + i,
+               is_2d ? "2D" : "1D", i);
+            // Raw U32 addresses are bytes in X. A pixel can contain a fraction of a word or several words.
+            sp(s, "uint surface_read%d(uint address, int y) {\n"
+                  "  uint bpp = surface_meta[%d].x;\n"
+                  "  if ((address & 3u) != 0u) return 0u;\n"
+                  "  uint word = 0u;\n"
+                  "  for (uint b = 0u; b < 4u; b += bpp) {\n"
+                  "    uint x = address + b;\n"
+                  "    vec2 p = floor((vec2(x / bpp, y) + 0.5) * uintBitsToFloat(surface_meta[%d].yz));\n",
+               i, i, i);
+            if (is_2d)
+                sp(s, "    if (any(lessThan(p, vec2(0))) || any(greaterThanEqual(p, vec2(textureSize(surface_in%d, 0))))) return 0u;\n"
+                      "    uvec4 texel = texelFetch(surface_in%d, ivec2(p), 0);\n", i, i);
+            else
+                sp(s, "    if (p.x >= float(textureSize(surface_in%d, 0))) return 0u;\n"
+                      "    uvec4 texel = texelFetch(surface_in%d, int(p.x), 0);\n", i, i);
+            sp(s, "    word |= texel[(x %% bpp) >> 2u] << (8u * b);\n"
+                  "  }\n"
+                  "  return word;\n"
+                  "}\n");
+        }
+        if (stores & bit) {
+            unsigned kind = c->key ? (c->key->surface_kinds >> (i * 2)) & 3 : 0;
+            sp(s, "layout(set = 0, binding = %d) uniform writeonly %simage2D surface_out%d;\n",
+               SURFACE_WRITE_BINDING + i, kind == 1 ? "i" : kind == 2 ? "u" : "", i);
+            sp(s, "void surface_write%d(ivec2 p, uvec4 bits) {\n"
+                  "  vec2 scale = uintBitsToFloat(surface_meta[%d].yz);\n"
+                  "  ivec2 size = imageSize(surface_out%d);\n"
+                  "  vec2 first = floor(vec2(p) * scale);\n"
+                  "  if (any(lessThan(first, vec2(0))) || any(greaterThanEqual(first, vec2(size)))) return;\n"
+                  "  ivec2 end = min(ivec2(floor((vec2(p) + 1.0) * scale)), size);\n"
+                  "  for (int y = int(first.y); y < end.y; y++)\n"
+                  "    for (int x = int(first.x); x < end.x; x++)\n"
+                  "      imageStore(surface_out%d, ivec2(x, y), %s(bits));\n"
+                  "}\n", i, i, i, i, kind == 1 ? "ivec4" : kind == 2 ? "uvec4" : "uintBitsToFloat");
+        }
+    }
 }
 
 // A rewritten body with the state it runs in: registers, predicates, flags, local memory and the control flow's
@@ -2236,6 +2357,9 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     if (info->cbuf_mask >> 18) fail(c, "cbuf index out of range");
     for (int i = 0; i < info->ntex; i++)
         if (info->tex[i].shadow && info->tex[i].type == TEXTYPE_3D) fail(c, "3d shadow texture");
+    if ((info->surface_load_1d & info->surface_load_2d) ||
+        (info->surface_atomic & (info->surface_load_2d | info->surface_store)))
+        fail(c, "surface slot has conflicting dimensions");
     if (c->fail) { free(body.buf); free(pbody.buf); free(c->body.buf); free(c); return info; }
     int set = stage == STAGE_FRAGMENT ? 1 : 0;
     Str s = {0};  // (the prelude goes in front at the end: glsl_with_prelude)
@@ -2292,14 +2416,20 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         sp(&s, "layout(std140, set = %d, binding = 19) uniform Tint { vec4 ltint[2]; };\n", set);
         info->uses_tint = true;
     }
+    glsl_surfaces(c, &s);
     if (c->uses_gather) sp(&s, "layout(constant_id = %d) const float GATHER_BIAS = 0.0f;\n", GATHER_BIAS_ID);  // (glsl_gather)
     for (int i = 0; i < info->ntex; i++) {
         ShaderTexture *t = &info->tex[i];
         sp(&s, "layout(set = %d, binding = %d) uniform %s t%d;\n", set, 32 + i, glsl_sampler_type(t), i);
+        if (c->tex_level_queries & (1ull << i)) {
+            if (t->type == TEXTYPE_2D_MS) sp(&s, "#define tlevels%d() 1u\n", i);
+            else sp(&s, "#define tlevels%d() uint(textureQueryLevels(t%d))\n", i, i);
+        }
         // size of level l as (width, height, depth or layers)
         switch (t->type) {
         case TEXTYPE_1D: sp(&s, "ivec3 tsize%d(int l) { return ivec3(textureSize(t%d, l), 1, 1); }\n", i, i); break;
         case TEXTYPE_1D_ARRAY: sp(&s, "ivec3 tsize%d(int l) { ivec2 s = textureSize(t%d, l); return ivec3(s.x, 1, s.y); }\n", i, i); break;
+        case TEXTYPE_2D_MS: sp(&s, "ivec3 tsize%d(int l) { return ivec3(textureSize(t%d), 1); }\n", i, i); break;
         case TEXTYPE_3D: case TEXTYPE_2D_ARRAY: case TEXTYPE_CUBE_ARRAY:
             sp(&s, "ivec3 tsize%d(int l) { return textureSize(t%d, l); }\n", i, i); break;
         default: sp(&s, "ivec3 tsize%d(int l) { return ivec3(textureSize(t%d, l), 1); }\n", i, i);

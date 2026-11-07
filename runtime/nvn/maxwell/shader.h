@@ -55,6 +55,7 @@ typedef struct {
     uint8_t glsl;           // emit Vulkan GLSL (see the contract above) instead of MSL
     uint8_t point_size;     // vertex, GLSL: the draw is a point list; a shader that writes no point size writes 1.0
                             // (NVN's default size; without maintenance5 Vulkan leaves it undefined)
+    uint16_t surface_kinds; // compute: two bits per image slot (0 float, 1 signed, 2 unsigned), in former padding
     uint32_t shared_size;   // compute: shared memory bytes (from the program's control section)
 } ShaderKey;
 
@@ -87,6 +88,7 @@ typedef struct {
     bool uses_tint;         // fragment: reads the per-draw tint (buffer 19, float4[2]) applied to color target 0
     bool uses_rscale;       // reads the resolution-scale table (fragment/compute buffer 18): float4 [0] = render
                             // target scale, [1 + i] = allocation scale of texture i
+    uint8_t surface_load_1d, surface_load_2d, surface_store, surface_atomic;  // compute image slots
     uint32_t local_mem;     // bytes of local memory
     uint32_t num_insts;
     char error[256];        // set when translation fails
@@ -97,6 +99,10 @@ typedef struct {
 #define GMEM2_BUFFER_INDEX 20       // (Vulkan) the heap past GMEM_SPLIT: a second binding
 #define GMEM_SPLIT 0x68000000ull    // bytes in the first binding; both stay under 2 GB for the whole heap (HEAP_MAX)
 #define GSNAP_BUFFER_INDEX 21       // (Vulkan, read-only global memory) ranges of it copied at translation: exec.c gsnap
+#define SURFACE_INFO_BINDING 22
+#define SURFACE_READ_BINDING 96
+#define SURFACE_WRITE_BINDING 104
+#define SURFACE_SLOTS 8
 #define GATHER_BIAS_ID 100          // (Vulkan) the specialization constant glsl_gather moves its coordinates by (exec.c vk_gather_spec)
 extern uint64_t maxwell_gmem_base, maxwell_gmem_size;
 // Set by the Vulkan backend before translating: global memory in two bindings (maxStorageBufferRange below the heap),

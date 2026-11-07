@@ -380,6 +380,8 @@ static void create_image(NvnTexture *t, TexBackend *b) {
     VkImageUsageFlags usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     if (depthfmt) usage |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
     else if (format_supports(vf, VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT)) usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    if (b->surface_storage && samples == 1 && format_supports(vf, VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT))
+        usage |= VK_IMAGE_USAGE_STORAGE_BIT;
     VkImageCreateFlags flags = 0;
     if (!depthfmt) flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;  // format views (NVN texture views, raw sRGB views)
     // Square 2D arrays of 6 layers or more are made cube compatible (cube views of them can come). On AMD's own driver
@@ -408,7 +410,7 @@ static void create_image(NvnTexture *t, TexBackend *b) {
     // (vk_texture_drop_format_list).
     VkImageFormatListCreateInfo fl = {.sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO};
     b->nview_fmt = 0;
-    if ((usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) && g_vk.lean_usage && !b->feedback_seen) {
+    if ((usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) && g_vk.lean_usage && !b->feedback_seen && !b->surface_alias) {
         VkFormat twin = srgb_twin(vf);
         b->view_fmt[0] = vf;
         b->view_fmt[1] = twin;
@@ -450,6 +452,11 @@ static void create_image(NvnTexture *t, TexBackend *b) {
         ci.usage &= ~VK_IMAGE_USAGE_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT;
         r = vmaCreateImage(g_vk.vma, &ci, &ai, &b->image, &b->mem, NULL);
     }
+    if (r != VK_SUCCESS && (ci.usage & VK_IMAGE_USAGE_STORAGE_BIT)) {
+        // Preserve the original image format if this device rejects the additional storage usage.
+        ci.usage &= ~VK_IMAGE_USAGE_STORAGE_BIT;
+        r = vmaCreateImage(g_vk.vma, &ci, &ai, &b->image, &b->mem, NULL);
+    }
     if (sparse ? image_format_fallback_error(r) : r != VK_SUCCESS) {
         LOG("[vk] image creation failed (%d): nvn fmt %#x %ux%ux%u target %u\n", r, t->format, t->width, t->height, t->depth, t->target);
         ci.format = vf = VK_FORMAT_R8G8B8A8_UNORM;
@@ -469,6 +476,7 @@ static void create_image(NvnTexture *t, TexBackend *b) {
         VK_CHECK(r);
     }
     b->cube_ok = (ci.flags & VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT) != 0;
+    b->storage_ok = (ci.usage & VK_IMAGE_USAGE_STORAGE_BIT) != 0;
     b->not_attachable = !(ci.usage & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT));
     static uint64_t serials;
     b->serial = __atomic_add_fetch(&serials, 1, __ATOMIC_RELAXED);
@@ -1454,19 +1462,15 @@ bool vk_native_post_target(NvnTexture *t) {
     return true;
 }
 
-// A target found in a feedback loop (exec.c) made again without its view format list, contents copied: RADV keeps no
-// DCC in the feedback loop layout, and decompressed the whole image each time a pass moved it there (the G-buffer
-// target BOTW's terrain reads and writes: the start of each of its passes 0.12 -> 1.39 ms of GPU on a Radeon 660M).
-void vk_texture_drop_format_list(NvnTexture *t) {
-    TexBackend *b = tex_backend(t);
-    if (!b->nview_fmt || !b->image) return;
+// Upgrade the allocation's usage or view compatibility without dropping earlier GPU writes.
+static void recreate_image_preserving(NvnTexture *t, TexBackend *b) {
     VkImage old = b->image;
     VmaAllocation old_mem = b->mem;
     views_forget(b);
     texmem_forget(b);
     b->image = VK_NULL_HANDLE;
     b->mem = VK_NULL_HANDLE;
-    create_image(t, b);  // (feedback_seen: no list; its layout is set in the upload buffer, which runs first)
+    create_image(t, b);  // its layout is set in the upload buffer, which runs first
     VkImageCopy r[16];
     uint32_t n = b->levels < 16 ? b->levels : 16;
     for (uint32_t lv = 0; lv < n; lv++) {
@@ -1479,6 +1483,12 @@ void vk_texture_drop_format_list(NvnTexture *t) {
     rec_CmdCopyImage(cb, old, VK_IMAGE_LAYOUT_GENERAL, b->image, VK_IMAGE_LAYOUT_GENERAL, n, r);
     vk_full_barrier(cb);
     defer((Dead){.img = old, .mem = old_mem});
+}
+
+// RADV keeps no DCC in the feedback loop layout. A view format list made it decompress the whole image each time.
+void vk_texture_drop_format_list(NvnTexture *t) {
+    TexBackend *b = tex_backend(t);
+    if (b->nview_fmt && b->image) recreate_image_preserving(t, b);
 }
 
 uint8_t vk_texture_scale_group(NvnTexture *t) { return tex_backend(t)->rs_group; }
@@ -1501,7 +1511,7 @@ void renderer_upload_rgba(NvnTexture *t, const void *rgba, uint32_t w, uint32_t 
 
 // ================================================================== views
 #define VIEW_TAB 16384
-typedef struct { TexBackend *b; uint64_t k1, k2; VkImageView view; } ViewEnt;
+typedef struct { TexBackend *b; uint64_t k1, k2; VkImageView view; VkImageUsageFlags usage; } ViewEnt;
 static ViewEnt view_tab[VIEW_TAB];
 
 // Views may still be referenced by submitted or pending work: destroyed once that has completed.
@@ -1548,22 +1558,25 @@ static void evict_idle_images(void) {
     }
 }
 
-VkImageView vk_image_view(TexBackend *b, VkImageViewType type, VkFormat fmt, uint32_t lv0, uint32_t nlv, uint32_t ly0,
-                          uint32_t nly, VkComponentMapping sw, VkImageAspectFlags aspect) {
+static VkImageView image_view_usage(TexBackend *b, VkImageViewType type, VkFormat fmt, uint32_t lv0, uint32_t nlv, uint32_t ly0,
+                                    uint32_t nly, VkComponentMapping sw, VkImageAspectFlags aspect, VkImageUsageFlags usage) {
     fmt = vk_view_format(b, fmt);  // (g_vk.lean_usage: only the listed formats)
     uint64_t k1 = (uint64_t)type | (uint64_t)fmt << 8 | (uint64_t)lv0 << 40 | (uint64_t)nlv << 48 | (uint64_t)aspect << 56;
     uint64_t k2 = (uint64_t)ly0 | (uint64_t)nly << 16 | (uint64_t)sw.r << 32 | (uint64_t)sw.g << 40 | (uint64_t)sw.b << 48 | (uint64_t)sw.a << 56;
-    uint64_t h = ((uint64_t)(uintptr_t)b * 0x9E3779B97F4A7C15ull) ^ (k1 * 0xC2B2AE3D27D4EB4Full) ^ (k2 * 0x165667B19E3779F9ull);
+    uint64_t h = ((uint64_t)(uintptr_t)b * 0x9E3779B97F4A7C15ull) ^ (k1 * 0xC2B2AE3D27D4EB4Full) ^
+                 (k2 * 0x165667B19E3779F9ull) ^ usage;
     uint32_t slot = (uint32_t)(h ^ (h >> 32)) & (VIEW_TAB - 1);
     for (int probe = 0; probe < 16; probe++, slot = (slot + 1) & (VIEW_TAB - 1)) {
         ViewEnt *e = &view_tab[slot];
-        if (e->b == b && e->k1 == k1 && e->k2 == k2) return e->view;
+        if (e->b == b && e->k1 == k1 && e->k2 == k2 && e->usage == usage) return e->view;
         if (!e->b) break;
     }
     extern uint64_t prof_views_created;
     prof_views_created++;
     SW_TALLY("tex/views created");
-    VkImageViewCreateInfo vi = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = b->image, .viewType = type,
+    VkImageViewUsageCreateInfo ui = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO, .usage = usage};
+    VkImageViewCreateInfo vi = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .pNext = usage ? &ui : NULL,
+                                .image = b->image, .viewType = type,
                                 .format = fmt, .components = sw, .subresourceRange = {aspect, lv0, nlv, ly0, nly}};
     VkImageView v;
     if (vkCreateImageView(g_vk.dev, &vi, NULL, &v) != VK_SUCCESS) {
@@ -1573,8 +1586,13 @@ VkImageView vk_image_view(TexBackend *b, VkImageViewType type, VkFormat fmt, uin
     }
     ViewEnt *e = &view_tab[slot];
     if (e->b) { defer((Dead){.view = e->view}); vk_view_gen++; }  // evict (16 probes taken)
-    *e = (ViewEnt){b, k1, k2, v};
+    *e = (ViewEnt){b, k1, k2, v, usage};
     return v;
+}
+
+VkImageView vk_image_view(TexBackend *b, VkImageViewType type, VkFormat fmt, uint32_t lv0, uint32_t nlv, uint32_t ly0,
+                          uint32_t nly, VkComponentMapping sw, VkImageAspectFlags aspect) {
+    return image_view_usage(b, type, fmt, lv0, nlv, ly0, nly, sw, aspect, 0);
 }
 
 static VkImageViewType view_type_for(int textype) {
@@ -1872,10 +1890,10 @@ VkImageView vk_view(NvnTexture *t, const NvnTextureView *v, bool has_view, bool 
     }
     VkImageAspectFlags aspect = b->aspect & VK_IMAGE_ASPECT_DEPTH_BIT ? VK_IMAGE_ASPECT_DEPTH_BIT : b->aspect;
     VkComponentMapping sw = IDENTITY;
-    if (!(b->aspect & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) && b->samples == 1) sw = vk_sample_swizzle(t, v);
+    if (!(b->aspect & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT))) sw = vk_sample_swizzle(t, v);
     VkImageViewType want = view_type_for(want_textype);
     VkImageViewType have = b->base_type;
-    if (b->samples > 1) return vk_dummy_view(want_textype);  // multisampled images can't be sampled as 2D
+    if ((b->samples > 1) != (want_textype == TEXTYPE_2D_MS)) return vk_dummy_view(want_textype);
     if (want == have) {
         if (have == VK_IMAGE_VIEW_TYPE_CUBE) nly = 6;
         return vk_image_view(b, want, fmt, lv0, nlv, ly0, nly, sw, aspect);
@@ -1899,6 +1917,53 @@ VkImageView vk_view(NvnTexture *t, const NvnTextureView *v, bool has_view, bool 
     return vk_dummy_view(want_textype);
 }
 
+// The surface instruction's raw view exposes the bytes of one texel as unsigned components.
+VkImageView vk_surface_view(NvnTexture *t, const NvnTextureView *v, bool one_d, bool write, bool atomic, uint32_t *bpp) {
+    TexBackend *b = vk_tex(t, false);
+    if (!b->image || b->samples != 1 || b->aspect != VK_IMAGE_ASPECT_COLOR_BIT || b->in_feedback_layout) return VK_NULL_HANDLE;
+    bool is_1d = b->base_type == VK_IMAGE_VIEW_TYPE_1D || b->base_type == VK_IMAGE_VIEW_TYPE_1D_ARRAY;
+    if (one_d != is_1d || b->base_type == VK_IMAGE_VIEW_TYPE_3D) return VK_NULL_HANDLE;
+    VkFormat format = b->format;
+    if (!write || atomic) {
+        const FormatInfo *fi = t->layout.fmt;
+        VkFmt native = fmt_of(t->format);
+        if (!fi || fi->bw != 1 || fi->bh != 1 || native.vf != b->format || native.expand_rgb) return VK_NULL_HANDLE;
+        *bpp = fi->bpb;
+        switch (*bpp) {
+        case 1: format = VK_FORMAT_R8_UINT; break;
+        case 2: format = VK_FORMAT_R16_UINT; break;
+        case 4: format = VK_FORMAT_R32_UINT; break;
+        case 8: format = VK_FORMAT_R32G32_UINT; break;
+        case 16: format = VK_FORMAT_R32G32B32A32_UINT; break;
+        default: return VK_NULL_HANDLE;
+        }
+        if (atomic && (*bpp != 4 || b->sx != 1 || b->sy != 1)) return VK_NULL_HANDLE;
+        if (!format_supports(format, atomic ? VK_FORMAT_FEATURE_STORAGE_IMAGE_ATOMIC_BIT : VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT))
+            return VK_NULL_HANDLE;
+    } else {
+        if (v && (v->setmask & 4) && v->format) format = fmt_of(v->format).vf;
+        VkFormatProperties3 p3 = {.sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3};
+        VkFormatProperties2 p2 = {.sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2, .pNext = &p3};
+        vkGetPhysicalDeviceFormatProperties2(g_vk.phys, format, &p2);
+        if (!(p3.optimalTilingFeatures & VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT)) return VK_NULL_HANDLE;
+    }
+    uint32_t level = v && (v->setmask & 1) ? v->base_level : 0;
+    uint32_t layer = v && (v->setmask & 2) ? v->min_layer : 0;
+    if (level >= b->levels || layer >= b->layers) return VK_NULL_HANDLE;
+    bool alias = b->nview_fmt && format != b->format;
+    bool storage = (write || atomic) && !b->storage_ok;
+    if (storage && (b->surface_storage || !format_supports(b->format, VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)))
+        return VK_NULL_HANDLE;
+    if (alias || storage) {
+        b->surface_alias |= alias;
+        b->surface_storage |= storage;
+        recreate_image_preserving(t, b);
+        if (storage && !b->storage_ok) return VK_NULL_HANDLE;
+    }
+    return image_view_usage(b, one_d ? VK_IMAGE_VIEW_TYPE_1D : VK_IMAGE_VIEW_TYPE_2D, format, level, 1, layer, 1,
+                            IDENTITY, VK_IMAGE_ASPECT_COLOR_BIT, write ? VK_IMAGE_USAGE_STORAGE_BIT : VK_IMAGE_USAGE_SAMPLED_BIT);
+}
+
 // 1x1 black textures for unbound slots, per type
 VkImageView vk_dummy_view(int textype) {
     static TexBackend dummies[10];
@@ -1912,7 +1977,8 @@ VkImageView vk_dummy_view(int textype) {
                             .imageType = vt == VK_IMAGE_VIEW_TYPE_3D ? VK_IMAGE_TYPE_3D
                                        : vt == VK_IMAGE_VIEW_TYPE_1D || vt == VK_IMAGE_VIEW_TYPE_1D_ARRAY ? VK_IMAGE_TYPE_1D : VK_IMAGE_TYPE_2D,
                             .format = VK_FORMAT_R8G8B8A8_UNORM, .extent = {1, 1, 1}, .mipLevels = 1, .arrayLayers = cube ? 6 : 1,
-                            .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
+                            .samples = textype == TEXTYPE_2D_MS ? VK_SAMPLE_COUNT_4_BIT : VK_SAMPLE_COUNT_1_BIT,
+                            .tiling = VK_IMAGE_TILING_OPTIMAL,
                             .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT};
     VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
     VK_CHECK(vmaCreateImage(g_vk.vma, &ci, &ai, &b->image, &b->mem, NULL));

@@ -6219,7 +6219,7 @@ static void texture_info_(int stage, ShaderInfo *si, int i, VkDescriptorImageInf
             renderer_texture_scale(et, &sc[0], &sc[1]);
             material = et->backend && !((TexBackend *)et->backend)->gpu_owned;
             text_sheet = et->backend && ((TexBackend *)et->backend)->text_scale;
-            if (et == scene_up.t && stage == 1) {  // (with the texture's own swizzle: BOTW draws its weapon wheel's
+            if (et == scene_up.t && stage == 1 && st_->type != TEXTYPE_2D_MS) {  // (with the texture's own swizzle: BOTW draws its weapon wheel's
                 // blurred capture of the scene, whose alpha is 0, with alpha forced to 1)
                 view = vk_image_view(scene_up.img, VK_IMAGE_VIEW_TYPE_2D, scene_up.img->format, 0, 1, 0, 1,
                                      vk_sample_swizzle(et, e->has_view ? &e->view : NULL), VK_IMAGE_ASPECT_COLOR_BIT);
@@ -6231,7 +6231,8 @@ static void texture_info_(int stage, ShaderInfo *si, int i, VkDescriptorImageInf
                 layout = VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT;
             for (int k = 0; k < nfeedback; k++)
                 if (et == feedback_tex[k] && feedback_any_type[k]) view = feedback_view[k], layout = VK_IMAGE_LAYOUT_GENERAL;
-                else if (et == feedback_tex[k] && (st_->type == TEXTYPE_2D || st_->type == TEXTYPE_2D_ARRAY)) {
+                else if (et == feedback_tex[k] && (st_->type == TEXTYPE_2D || st_->type == TEXTYPE_2D_ARRAY ||
+                                                  (st_->type == TEXTYPE_2D_MS && et->samples > 1))) {
                     view = feedback_view[k];
                     layout = VK_IMAGE_LAYOUT_GENERAL;
                     if (st_->type == TEXTYPE_2D_ARRAY) view = vk_dummy_view(TEXTYPE_2D_ARRAY);  // (2D snapshot as array: rare)
@@ -6539,13 +6540,63 @@ static VkDescriptorBufferInfo gsnap_info(int stage) {
     return bi;
 }
 
+typedef struct {
+    VkImageView read[SURFACE_SLOTS], write[SURFACE_SLOTS];
+    NvnTexture *written[SURFACE_SLOTS];
+    struct { uint32_t bpp; float sx, sy; uint32_t pad; } meta[SURFACE_SLOTS];
+} ComputeSurfaces;
+
+static const NvnTexEntry *compute_image_entry(unsigned slot) {
+    uint64_t handle = st.img[STAGE_COMPUTE][slot];
+    uint32_t index = (uint32_t)handle & 0xfffff;
+    if (!handle || !st.tpool || index >= (uint32_t)st.tpool->count) return NULL;
+    return &((NvnTexEntry *)st.tpool->entries)[index];
+}
+
+static uint16_t compute_surface_kinds(void) {
+    uint16_t kinds = 0;
+    for (unsigned i = 0; i < SURFACE_SLOTS; i++) {
+        const NvnTexEntry *e = compute_image_entry(i);
+        if (!e || !e->tex) continue;
+        int kind = rt_kind(e->has_view && (e->view.setmask & 4) && e->view.format ? e->view.format : e->tex->format);
+        if (kind >= 5) kind = kind < 7 ? 2 : 1;
+        kinds |= (uint16_t)(kind << (i * 2));
+    }
+    return kinds;
+}
+
+static bool prepare_compute_surfaces(const ShaderInfo *si, ComputeSurfaces *surfaces) {
+    unsigned reads = (si->surface_load_1d | si->surface_load_2d) & ~si->surface_atomic;
+    unsigned writes = si->surface_store | si->surface_atomic;
+    for (unsigned i = 0; i < SURFACE_SLOTS; i++) {
+        unsigned bit = 1u << i;
+        if (!((reads | writes) & bit)) continue;
+        const NvnTexEntry *e = compute_image_entry(i);
+        if (!e || !e->tex) return false;
+        const NvnTextureView *v = e->has_view ? &e->view : NULL;
+        bool atomic = si->surface_atomic & bit, one_d = si->surface_load_1d & bit;
+        // Prepare storage usage first: if the image has to be recreated, resolve its sampled view afterward.
+        if (writes & bit) {
+            surfaces->write[i] = vk_surface_view(e->tex, v, atomic, true, atomic, &surfaces->meta[i].bpp);
+            if (!surfaces->write[i]) return false;
+            surfaces->written[i] = e->tex;
+        }
+        if (reads & bit) {
+            surfaces->read[i] = vk_surface_view(e->tex, v, one_d, false, false, &surfaces->meta[i].bpp);
+            if (!surfaces->read[i]) return false;
+        }
+        renderer_texture_scale(e->tex, &surfaces->meta[i].sx, &surfaces->meta[i].sy);
+    }
+    return true;
+}
+
 // Writes the descriptor set of one stage. gx..gz: compute group counts (driver constants).
 // pre_ii: texture descriptors already resolved by the caller (draw: fragment textures, needed earlier for the
 // viewport decision), or NULL.
 // dyn / ndyn: the offsets of its dynamic uniform buffers, by binding (ubo_dynamic_mark), appended.
 static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t set, int stage, ShaderInfo *si, const float *rscale_row0,
                                  const float tint[8], uint32_t gx, uint32_t gy, uint32_t gz, const VkDescriptorImageInfo *pre_ii,
-                                 uint32_t *dyn, int *ndyn) {
+                                 uint32_t *dyn, int *ndyn, const ComputeSurfaces *surfaces) {
 #ifdef _WIN32
     if (si->uses_gmem) (void)gmem_info();
     if (gmem_sparse && si->writes_gmem && stage >= 0 && stage < 6) {
@@ -6591,7 +6642,19 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
         if (b->set != set) continue;
         w[n] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = VK_NULL_HANDLE, .dstBinding = b->binding,
                                       .descriptorCount = 1, .descriptorType = b->type};
-        if (b->type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER && b->binding >= 32) {
+        if (surfaces && b->binding >= SURFACE_READ_BINDING && b->binding < SURFACE_WRITE_BINDING) {
+            ii[n] = (VkDescriptorImageInfo){vk_default_sampler(false), surfaces->read[b->binding - SURFACE_READ_BINDING],
+                                            VK_IMAGE_LAYOUT_GENERAL};
+            w[n].pImageInfo = &ii[n];
+        } else if (surfaces && b->binding >= SURFACE_WRITE_BINDING && b->binding < SURFACE_WRITE_BINDING + SURFACE_SLOTS) {
+            ii[n] = (VkDescriptorImageInfo){VK_NULL_HANDLE, surfaces->write[b->binding - SURFACE_WRITE_BINDING],
+                                            VK_IMAGE_LAYOUT_GENERAL};
+            w[n].pImageInfo = &ii[n];
+        } else if (surfaces && b->binding == SURFACE_INFO_BINDING) {
+            size_t size = sizeof surfaces->meta;
+            bi[n] = ubo_span(vk_transient_copy(surfaces->meta, size, 256), size);
+            w[n].pBufferInfo = &bi[n];
+        } else if (b->type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER && b->binding >= 32) {
             int ti = (int)b->binding - 32;
             float sc[2]; uint32_t wh[2];
             if (ti < si->ntex && pre_ii && ti < 64) { ii[n] = pre_ii[ti]; sc[0] = tex_sc[sg][ti][0]; sc[1] = tex_sc[sg][ti][1]; wh[0] = tex_wh[sg][ti][0]; wh[1] = tex_wh[sg][ti][1]; }
@@ -6740,20 +6803,23 @@ static void build_compute(void *arg) {
     atomic_store(&cp->p.state, atomic_load(&c->state) == 2 ? 1 : 2);
 }
 
-static struct CsEnt { uint64_t addr; CsProg *cp; } g_cs_tab[256];  // compute programs by code address
+static struct CsEnt { uint64_t addr; uint16_t surface_kinds; CsProg *cp; } g_cs_tab[256];
 
 static CsProg *compute_program(NvnProgram *np) {
     NvnShaderStage *ss = &np->stages[5];
     if (!ss->code_addr) return NULL;
+    uint16_t surface_kinds = compute_surface_kinds();
     struct CsEnt *tab = g_cs_tab;
     int n = g_cs_n;
-    for (int i = 0; i < n; i++) if (tab[i].addr == ss->code_addr) return tab[i].cp;
+    for (int i = 0; i < n; i++)
+        if (tab[i].addr == ss->code_addr && tab[i].surface_kinds == surface_kinds) return tab[i].cp;
     CsProg *cp = calloc(1, sizeof *cp);
-    if (n < 256) { tab[n].addr = ss->code_addr; tab[n].cp = cp; g_cs_n = n + 1; }
+    if (n < 256) { tab[n] = (struct CsEnt){ss->code_addr, surface_kinds, cp}; g_cs_n = n + 1; }
     maxwell_gmem_base = HEAP_BASE;
     maxwell_gmem_size = HEAP_MAX;
     ShaderKey k = {0};
     k.glsl = 1;
+    k.surface_kinds = surface_kinds;
     k.shared_size = ss->control ? *(const uint32_t *)(ss->control + 0x754) : 0;  // (next to the group size at 0x748)
     pthread_mutex_lock(&translate_lock);
     cp->si = vk_translate_cached((const uint8_t *)(uintptr_t)ss->code_addr, ss->const_offset ? ss->const_offset : 0x10000, STAGE_COMPUTE, &k);
@@ -6763,6 +6829,11 @@ static CsProg *compute_program(NvnProgram *np) {
         LOG("[compute] translate failed: %s (code %llx)\n", cp->si->error, (unsigned long long)ss->code_addr);
         dump_failed_shader(ss->code_addr, ss->const_offset ? ss->const_offset : 0x10000, "cs");
         if (ss->control) dump_failed_shader((uint64_t)(uintptr_t)ss->control, 0x800, "cs_control");
+        atomic_store(&cp->p.state, 2);
+        return cp;
+    }
+    if (cp->si->surface_store && !g_vk.storage_write_unformatted) {
+        LOG("[compute] formatted surface store needs shaderStorageImageWriteWithoutFormat\n");
         atomic_store(&cp->p.state, 2);
         return cp;
     }
@@ -7111,6 +7182,7 @@ bool vk_pso_warm_stage(const ShaderInfo *si, int stage) {
 }
 
 bool vk_pso_warm_compute(const ShaderInfo *si, const uint32_t local[3]) {
+    if (si->surface_store && !g_vk.storage_write_unformatted) return false;
     VkBindingInfo binds[MAX_BIND];
     int nb = 0;
     VkShaderModule m = warm_module(si, STAGE_COMPUTE, binds, &nb, MAX_BIND);
@@ -7264,6 +7336,21 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
     if (!cp || atomic_load(&cp->p.state) != 1) { stat_skipped++; return; }
     gw_check((const uint32_t[6]){0, 0, 0, 0, 0, cp->si->cbuf_mask}, false, 0, 0);
     vk_end_pass();
+    ComputeSurfaces surfaces = {0};
+    bool has_surfaces = cp->si->surface_load_1d || cp->si->surface_load_2d || cp->si->surface_store || cp->si->surface_atomic;
+    if (has_surfaces) {
+        extern uint32_t vk_view_gen;
+        uint32_t before = vk_view_gen;
+        // Aliased slots may refer to one allocation. Resolve again after any usage upgrade.
+        if (!prepare_compute_surfaces(cp->si, &surfaces) ||
+            (before != vk_view_gen && !prepare_compute_surfaces(cp->si, &surfaces))) {
+            static int logged;
+            if (logged++ < 12) LOG("[compute] missing or unsupported bound surface (code %llx)\n",
+                                    (unsigned long long)st.program->stages[5].code_addr);
+            stat_skipped++;
+            return;
+        }
+    }
     VkCommandBuffer cb = vk_cmd();
     vk_full_barrier(cb);
     gp_mark(cb, "dispatch %ux%ux%u (local %ux%ux%u)", gx, gy, gz, cp->local[0], cp->local[1], cp->local[2]);
@@ -7277,10 +7364,14 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
         LOG("\n");
     }
     nfeedback = 0;
-    VkDescriptorSet ds = stage_set(&cp->p, cp->p.set_layout[0], 0, 5, cp->si, NULL, NULL, gx, gy, gz, NULL, NULL, NULL);
+    VkDescriptorSet ds = stage_set(&cp->p, cp->p.set_layout[0], 0, 5, cp->si, NULL, NULL, gx, gy, gz, NULL, NULL, NULL,
+                                    has_surfaces ? &surfaces : NULL);
     rec_CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cp->pipe);
     rec_CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cp->p.layout, 0, 1, &ds, 0, NULL);
     rec_CmdDispatch(cb, gx, gy, gz);
+    if (has_surfaces)
+        for (unsigned i = 0; i < SURFACE_SLOTS; i++)
+            if (surfaces.written[i]) renderer_mark_gpu_owned(surfaces.written[i]);
     stat_dispatches++;
     chunk_draws++;
     if (cp->si->writes_gmem) {
@@ -8006,7 +8097,7 @@ have_pipe:
     uint32_t dyn[64];
     int ndyn = 0;
     hud_clip = false;  // (hud_patch, while the vertex stage's constant buffers are bound)
-    VkDescriptorSet vset = stage_set(pr, pr->set_layout[0], 0, 0, pr->vi, NULL, NULL, 0, 0, 0, NULL, dyn, &ndyn);
+    VkDescriptorSet vset = stage_set(pr, pr->set_layout[0], 0, 0, pr->vi, NULL, NULL, 0, 0, 0, NULL, dyn, &ndyn, NULL);
     PROFD_ADD(prof_sets);
     ProfZone pz4 = PZ_NOW();
     PZ_SPAN("exec/draw/sets", pz3, pz4);
@@ -8042,7 +8133,7 @@ have_pipe:
             up_fix.sx = (float)gb->width / (float)gt->width, up_fix.sy = (float)gb->height / (float)gt->height;
             up_fix.tw = gt->width, up_fix.th = gt->height, up_fix.aw = gb->width, up_fix.ah = gb->height;
             ndyn = 0;  // (the vertex set again, with its constants: the first of the draw's dynamic offsets)
-            vset = stage_set(pr, pr->set_layout[0], 0, 0, pr->vi, NULL, NULL, 0, 0, 0, NULL, dyn, &ndyn);
+            vset = stage_set(pr, pr->set_layout[0], 0, 0, pr->vi, NULL, NULL, 0, 0, 0, NULL, dyn, &ndyn, NULL);
         }
     }
     if (profd) prof_tex += SDL_GetTicksNS() - prof_tx_;
@@ -8134,7 +8225,7 @@ have_pipe:
         int i = g_cur_fs_hash == logged[0] ? -1 : !logged[0] ? 0 : g_cur_fs_hash == logged[1] ? -1 : !logged[1] ? 1 : -1;
         if (i >= 0) LOG("[fxaa] the game's FXAA off (fs hash %016llx)\n", (unsigned long long)(logged[i] = g_cur_fs_hash));
     }
-    VkDescriptorSet fset = stage_set(pr, pr->set_layout[1], 1, 1, pr->fi, rs0, tint, 0, 0, 0, fii, dyn, &ndyn);
+    VkDescriptorSet fset = stage_set(pr, pr->set_layout[1], 1, 1, pr->fi, rs0, tint, 0, 0, 0, fii, dyn, &ndyn, NULL);
     sdw_fix.s = 0, up_fix.sx = 0, fxaa_off = false;
     if (profd) prof_sets += SDL_GetTicksNS() - prof_t1_;
     PZ_SPAN("exec/draw/sets", pz6, PZ_NOW());
