@@ -71,3 +71,6 @@ int main(void){
     recompute_keyboard();assert(pitch==-1);
     puts("PASS: gyro defaults, pitch direction, U/O/P, remapping, camera ownership, disabling, pause/capture/focus and mouse bindings");
 }
+
+void vibration_detach(SDL_Gamepad *p) { (void)p; }
+void vibration_shutdown(void) {}

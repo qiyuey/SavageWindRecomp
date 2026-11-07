@@ -1097,7 +1097,7 @@ static void tab_about(void) {
     opt_toggle("Controller rumble", &g_settings.rumble, true, "Vibrate the controller during play.");
     float rumble_strength = (float)g_settings.rumble_strength;
     if (opt_slider("Rumble strength", &rumble_strength, 0, 100, 5, RUMBLE_STRENGTH_DEFAULT, "%g%%",
-                   "0%: off. 10%: original strength. 50%: 5x. 100%: 10x, limited to full output."))
+                   "0%: off. 20%: original strength. 50%: 2.5x. 100%: 5x, limited to full output."))
         g_settings.rumble_strength = (int)lroundf(rumble_strength);
     opt_toggle("Free camera with both sticks", &g_settings.freecam_sticks, true,
                "Clicking both sticks together turns the free camera on and off. Home on the keyboard always does.");

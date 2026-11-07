@@ -615,7 +615,7 @@ void build_items(void) {
     v.push_back(toggle(P_CONTROLS, "Controller rumble", "Vibrate the controller during play.",
                        [](const Item &) { return (int)g_settings.rumble; },
                        [](const Item &, int x) { g_settings.rumble = x; }, 1));
-    v.push_back(choice(P_CONTROLS, "Rumble strength", "0%: off. 10%: original strength. 50%: 5x. 100%: 10x, limited to full output.",
+    v.push_back(choice(P_CONTROLS, "Rumble strength", "0%: off. 20%: original strength. 50%: 2.5x. 100%: 5x, limited to full output.",
                        [](const Item &) { return 21; },
                        [](const Item &, int x) {
                            static std::string s;

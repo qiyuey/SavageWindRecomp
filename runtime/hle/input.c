@@ -430,8 +430,10 @@ void input_shutdown(void) {
     pad = NULL;
     if (closing) {
         vibration_update(closing, false);
+        vibration_detach(closing);
         SDL_CloseGamepad(closing);
     }
+    vibration_shutdown();
 }
 
 void input_focus_update(SDL_Window *w) {
@@ -632,6 +634,7 @@ void input_handle_event(const SDL_Event *e) {
     case SDL_EVENT_GAMEPAD_REMOVED:
         if (pad && SDL_GetGamepadID(pad) == e->gdevice.which) {
             vibration_update(pad, false);
+            vibration_detach(pad);
             SDL_CloseGamepad(pad);
             pad = NULL;
             note_family();

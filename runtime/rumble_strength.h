@@ -3,7 +3,7 @@
 #include <math.h>
 
 #define RUMBLE_STRENGTH_DEFAULT 50
-#define RUMBLE_BASE_GAIN 10.0f
+#define RUMBLE_BASE_GAIN 5.0f
 
 static inline int rumble_strength_percent(int percent) {
     return percent < 0 ? 0 : percent > 100 ? 100 : percent;

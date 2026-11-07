@@ -213,3 +213,6 @@ int main(void) {
     SDL_Quit();
     puts("input focus checks passed");
 }
+
+void vibration_detach(SDL_Gamepad *p) { (void)p; }
+void vibration_shutdown(void) {}

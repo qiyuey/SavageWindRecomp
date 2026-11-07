@@ -547,8 +547,18 @@ $(B)/test_vibration: tools/test_vibration.c runtime/hle/vibration.c runtime/vibr
 	@mkdir -p $(B)
 	$(CC) -O1 -DSDL_STATIC_LIB $(OSFLAGS) $(DEPINC) -Iruntime -o $@ tools/test_vibration.c -lpthread -lm
 
-test-vibration: $(B)/test_vibration
+$(B)/test_vibration_worker: tools/test_vibration_worker.c tools/test_vibration.c runtime/hle/vibration.c runtime/vibration.h runtime/settings.h runtime/rumble_strength.h runtime/services/hid_set.c
+	@mkdir -p $(B)
+	$(CC) -O1 -DSDL_STATIC_LIB $(OSFLAGS) $(DEPINC) -Iruntime -o $@ tools/test_vibration_worker.c -lpthread -lm
+
+# Explicit opt-in device test: run build/test_vibration_device --play.
+$(B)/test_vibration_device: tools/test_vibration_device.c runtime/hle/vibration.c runtime/vibration.h runtime/settings.h runtime/rumble_strength.h
+	@mkdir -p $(B)
+	$(CC) -O1 -DSDL_STATIC_LIB $(OSFLAGS) $(DEPINC) -Iruntime -o $@ $< $(if $(filter windows,$(PLATFORM)),$(SDL3_LIBDIR)/SDL3.lib,-lSDL3) -lpthread -lm
+
+test-vibration: $(B)/test_vibration $(B)/test_vibration_worker
 	$(B)/test_vibration
+	$(B)/test_vibration_worker
 
 .PHONY: test-vibration
 
@@ -720,13 +730,13 @@ test-hour: $(B)/test_hour
 
 .PHONY: test-hour
 
-# The BC5 view format (NVN 0x4C, SAVAGEWIND_BC5_UNORM): vk_format is the only function the section GC keeps from
-# textures.c, so no Vulkan device is needed. Run twice so both initial environment states cache the right format.
+# The BC5 format lookup is shared with textures.c. Link no image backend: PE/COFF
+# retains its external-data reference sections even with section GC. Test both initial environment states.
 ifneq ($(PLATFORM),macos)
-$(B)/test_textures_format: tests/test_textures_format.c runtime/nvn/vulkan/textures.c $(RT_HDRS)
+$(B)/test_textures_format: tests/test_textures_format.c runtime/nvn/vulkan/texture_formats.h
 	@mkdir -p $(dir $@)
 	$(CC) -O2 -ffunction-sections -fdata-sections $(OSFLAGS) $(DEPINC) -Iruntime -Iruntime/nvn -isystem third_party -isystem third_party/stb \
-	    -o $@ tests/test_textures_format.c runtime/nvn/vulkan/textures.c -fuse-ld=lld -Wl,--gc-sections \
+	    -o $@ tests/test_textures_format.c -fuse-ld=lld -Wl,--gc-sections \
 	    $(if $(filter windows,$(PLATFORM)),-Wl$(comma)--exclude-all-symbols) -lpthread -lm
 
 test-textures: $(B)/test_textures_format

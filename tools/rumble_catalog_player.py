@@ -9,10 +9,11 @@ import threading
 import time
 import tkinter as tk
 from tkinter import ttk
-from rumble_amplitude_mapping import BASE_STRENGTH_GAIN, PROFILES, map_samples
+from rumble_amplitude_mapping import catalog_strength_gain, map_samples
 
 ROOT=Path(__file__).resolve().parents[1]
 CATALOG=ROOT/'build/rumble-catalog/catalog.json'
+OOT_CATALOG=CATALOG.with_name('oot-catalog.json')
 
 
 def validate_samples(samples):
@@ -26,6 +27,36 @@ def validate_samples(samples):
         if any(not 0<=row[i]<=1 for i in (1,3,5,7)):raise ValueError('Amplitude outside range')
         if any(not 0<=row[i]<=20000 for i in (2,4,6,8)):raise ValueError('Frequency outside range')
     if any(samples[-1][i] for i in (1,3,5,7)):raise ValueError('Missing final silence')
+
+
+def load_catalogs(paths=None):
+    catalogs={}
+    for label,path in (paths if paths is not None else
+                       (('旷野之息',CATALOG),('时之笛重制版',OOT_CATALOG))):
+        if not path.exists():continue
+        data=json.loads(path.read_text(encoding='utf-8-sig'))
+        if data.get('game')=='oot':
+            entries=data['effects']
+        else:
+            entries=[dict(e,id='base:'+str(e['id'])) for e in data['effects']]+data.get('variants',[])
+        if len({str(e['id']) for e in entries})!=len(entries):raise ValueError('Duplicate effect ID')
+        for entry in entries:validate_samples(entry['samples'])
+        catalogs[label]=(path,data,entries)
+    if not catalogs:raise ValueError('找不到震动目录，请先导出资源')
+    return catalogs
+
+
+def routed_samples(samples,route):
+    if route not in ('双侧','左侧','右侧'):raise ValueError('Invalid audition route')
+    result=[list(row) for row in samples]
+    for row in result:
+        if route=='左侧':row[5]=row[7]=0
+        elif route=='右侧':row[1]=row[3]=0
+    return result
+
+
+def amplitude_peak(samples):
+    return max(max(row[i] for i in (1,3,5,7)) for row in samples)
 
 
 class Device:
@@ -51,7 +82,7 @@ class Device:
             send=bind('SDL_RumbleGamepadFrequenciesEx',C.c_bool,[C.c_void_p]+[C.c_float]*8+[C.c_uint])
             stop=bind('SDL_RumbleGamepad',C.c_bool,[C.c_void_p,C.c_ushort,C.c_ushort,C.c_uint])
             shutdown=bind('SDL_Quit',None,[])
-            hint(b'SDL_JOYSTICK_HIDAPI_SWITCH2_EXPERIMENTAL_HD',b'1');hint(b'SDL_JOYSTICK_HIDAPI_SWITCH2_HD_GAIN',b'1')
+            hint(b'SDL_JOYSTICK_HIDAPI_SWITCH2_EXPERIMENTAL_HD',b'1')
             if not init(0x2000):raise RuntimeError(error().decode(errors='replace'))
             playback=None;start=0.;index=0;late=0.;last=0.;entry_id=None
             def finish(reason):
@@ -146,6 +177,7 @@ def pattern_id(entry):
 
 
 def effect_name(entry):
+    if entry.get('game')=='oot':return entry['name']
     name=SIZE_NAMES[pattern_id(entry)]
     if str(entry['id']).startswith('base:'):
         return '基础 · '+name+('（单周期）' if pattern_id(entry)>=3 else '')
@@ -155,6 +187,9 @@ def effect_name(entry):
 
 
 def confirmed_scenes(entry,data):
+    if entry.get('game')=='oot':
+        calls=[c.get('Name','') for c in entry.get('calls',[])]
+        return ' / '.join(calls) if calls else '未找到明确文件关联；不推测场景'
     if not str(entry['id']).startswith('base:'):
         return '剧情资源调用已确认；具体情节未核实'
     found=[]
@@ -165,6 +200,27 @@ def confirmed_scenes(entry,data):
 
 
 def effect_description(entry,data):
+    if entry.get('game')=='oot':
+        samples=entry['samples'];loop=entry.get('loop')
+        low=[r[2] for r in samples[:-1]];high=[r[4] for r in samples[:-1]]
+        lines=[effect_name(entry),'','原始资源试听',
+          f"SDK 原生解码 · {entry['sample_rate_hz']} Hz 采样 · {entry['sample_count']} 个样本",
+          f"单次时长：{entry['duration_ms']/1000:.3f} 秒；峰值振幅：{amplitude_peak(samples):.5f}",
+          f'低频分量：{min(low):.3f}–{max(low):.3f} Hz；高频分量：{min(high):.3f}–{max(high):.3f} Hz',
+          '保留两组分量的逐样本振幅与频率；末尾额外发送停止。',
+          '回放位置是试听选择；文件本身不指定游戏中的左右分配。']
+        if loop:
+            lines.append(f"原始循环范围：样本 {loop['start_sample']}–{loop['end_sample']}（末端不含）；间隔 {loop['interval_samples']} 个样本。本项只播放整个文件一次。")
+        else:lines.append('文件没有循环元数据。')
+        lines+=['','资源调用记录（不等于实际场景回放）',confirmed_scenes(entry,data)]
+        for call in entry.get('calls',[]):
+            lines.append(json.dumps(call,ensure_ascii=False))
+        lines+=['Gain、Length 等运行时字段及缺省值尚未核实，保留原始值，不应用或猜测。',
+          f"全表 {len(data.get('call_table',[]))} 条调用；未明确关联文件的记录另保存在目录 JSON 中。",
+          '', '验证边界', '这是 HD1 参数式资源试听，经实验 SDL3 映射发送给 HD2 手柄；不是原生 HD Rumble 2 还原。',
+          '不重现游戏中的混合、优先级、距离衰减或模式处理。波形不是手柄实测。',
+          f"来源文件：{entry['source_file']}",f"SHA-256：{entry['source_sha256']}",f"检索 ID：{entry['id']}"]
+        return '\n'.join(lines)
     pid=pattern_id(entry);rows=entry['samples'];peak=max(max(r[1],r[3],r[5],r[7]) for r in rows)
     lines=[effect_name(entry),'', '这项在测什么',
       '目录保存游戏原始强弱包络，双侧同步回放；实验映射的输出另见上方峰值与曲线。',
@@ -190,10 +246,9 @@ def effect_description(entry,data):
 class Player:
     def __init__(self,root):
         self.root=root;self.current=None;self.ready=False;self.devices=[];self.selected_device=None
-        self.data=json.loads(CATALOG.read_text(encoding='utf-8'))
-        self.entries=[dict(e,id='base:'+str(e['id'])) for e in self.data['effects']]+self.data.get('variants',[])
-        for e in self.entries:validate_samples(e['samples'])
-        root.title('旷野之息 · 原生震动目录与回测')
+        self.catalogs=load_catalogs();self.game=tk.StringVar(value=next(iter(self.catalogs)))
+        self.catalog_path,self.data,self.entries=self.catalogs[self.game.get()]
+        root.title('游戏震动目录与回测 · 旷野之息 / 时之笛')
         dpi=root.winfo_fpixels('1i');scale=dpi/96
         # Fit the usable desktop instead of multiplying past the screen at 200%.
         from ctypes import wintypes
@@ -208,7 +263,7 @@ class Player:
         style.configure('Treeview',rowheight=max(24,int(28*scale)))
         frame=ttk.Frame(root,padding=int(12*scale));frame.pack(fill='both',expand=True)
         frame.columnconfigure(0,weight=1);frame.rowconfigure(7,weight=1)
-        ttk.Label(frame,text='旷野之息 · 原生震动回测',font=('Microsoft YaHei UI',20,'bold')).grid(row=0,column=0,sticky='w')
+        ttk.Label(frame,text='游戏震动目录与回测',font=('Microsoft YaHei UI',20,'bold')).grid(row=0,column=0,sticky='w')
         self.subtitle=ttk.Label(frame,text='原始强度与包络 · 选择条目查看说明 · 点击播放才震动')
         self.subtitle.grid(row=1,column=0,sticky='ew',pady=6)
         self.status=tk.StringVar(value='初始化手柄中…可以先浏览目录')
@@ -219,33 +274,36 @@ class Player:
         self.device_choice.grid(row=0,column=1,sticky='ew',padx=8)
         self.device_choice.bind('<<ComboboxSelected>>',self.choose_device)
         ttk.Button(devicebar,text='刷新设备',command=self.refresh_devices).grid(row=0,column=2)
-        mappingrow=ttk.Frame(frame);mappingrow.grid(row=4,column=0,sticky='ew',pady=4);mappingrow.columnconfigure(2,weight=1)
-        ttk.Label(mappingrow,text='振幅映射：').grid(row=0,column=0)
-        self.mapping=tk.StringVar(value=next(iter(PROFILES)))
-        mapping_choice=ttk.Combobox(mappingrow,state='readonly',textvariable=self.mapping,values=list(PROFILES),width=26)
-        mapping_choice.grid(row=0,column=1,padx=8)
-        mapping_choice.bind('<<ComboboxSelected>>',self.mapping_changed)
-        self.mapping_info=tk.StringVar(value='实验曲线尚未标定；仅用于 Switch 2 Pro 对比')
-        ttk.Label(mappingrow,textvariable=self.mapping_info).grid(row=0,column=2,sticky='w')
+        self.amplitude_info=tk.StringVar(value='仅应用震动强度；不叠加弱信号增强曲线')
+        ttk.Label(frame,textvariable=self.amplitude_info).grid(row=4,column=0,sticky='w',pady=4)
         strengthrow=ttk.Frame(frame);strengthrow.grid(row=5,column=0,sticky='ew',pady=4);strengthrow.columnconfigure(1,weight=1)
         ttk.Label(strengthrow,text='震动强度：').grid(row=0,column=0)
-        self.strength=tk.DoubleVar(value=50);self.strength_text=tk.StringVar(value='50%')
+        self.strength=tk.DoubleVar(value=50);self.strength_text=tk.StringVar()
         self.strength_redraw=None
         ttk.Scale(strengthrow,from_=0,to=100,variable=self.strength,command=self.strength_changed).grid(row=0,column=1,sticky='ew',padx=8)
-        ttk.Label(strengthrow,textvariable=self.strength_text,width=6).grid(row=0,column=2)
+        ttk.Label(strengthrow,textvariable=self.strength_text,width=14).grid(row=0,column=2)
         ttk.Button(strengthrow,text='恢复 50%',command=self.reset_strength).grid(row=0,column=3,padx=8)
-        ttk.Label(strengthrow,text='基准 ×10 · 10% 原始强度 · 100% 十倍请求').grid(row=0,column=4)
+        self.strength_hint=tk.StringVar()
+        ttk.Label(strengthrow,textvariable=self.strength_hint).grid(row=0,column=4)
+        self.update_strength_labels()
         self.search=tk.StringVar();self.search.trace_add('write',lambda *_:self.filter())
-        searchrow=ttk.Frame(frame);searchrow.grid(row=6,column=0,sticky='ew',pady=8);searchrow.columnconfigure(1,weight=1)
-        ttk.Label(searchrow,text='搜索名称 / 场景 / 资源：').grid(row=0,column=0)
-        ttk.Entry(searchrow,textvariable=self.search).grid(row=0,column=1,sticky='ew')
-        self.count=tk.StringVar();ttk.Label(searchrow,textvariable=self.count).grid(row=0,column=2,padx=8)
+        searchrow=ttk.Frame(frame);searchrow.grid(row=6,column=0,sticky='ew',pady=8);searchrow.columnconfigure(3,weight=1)
+        ttk.Label(searchrow,text='游戏：').grid(row=0,column=0)
+        self.game_choice=ttk.Combobox(searchrow,textvariable=self.game,values=list(self.catalogs),state='readonly',width=14)
+        self.game_choice.grid(row=0,column=1,padx=(0,8));self.game_choice.bind('<<ComboboxSelected>>',self.change_catalog)
+        ttk.Label(searchrow,text='搜索名称 / 场景 / 资源：').grid(row=0,column=2)
+        ttk.Entry(searchrow,textvariable=self.search).grid(row=0,column=3,sticky='ew')
+        self.count=tk.StringVar();ttk.Label(searchrow,textvariable=self.count).grid(row=0,column=4,padx=8)
+        self.route=tk.StringVar(value='双侧')
+        ttk.Label(searchrow,text='回放位置（试听）：').grid(row=1,column=0,columnspan=2,sticky='w',pady=(6,0))
+        route_choice=ttk.Combobox(searchrow,textvariable=self.route,values=('双侧','左侧','右侧'),state='readonly',width=8)
+        route_choice.grid(row=1,column=2,sticky='w',pady=(6,0));route_choice.bind('<<ComboboxSelected>>',lambda e:self.route_changed())
         paned=ttk.Panedwindow(frame,orient='horizontal');paned.grid(row=7,column=0,sticky='nsew')
         left=ttk.Frame(paned,width=int(width*.55));right=ttk.Frame(paned,width=int(width*.40))
         paned.add(left,weight=3);paned.add(right,weight=2)
         left.rowconfigure(0,weight=1);left.columnconfigure(0,weight=1)
         self.tree=ttk.Treeview(left,columns=('duration','peak'),show='tree headings',selectmode='browse',height=1)
-        self.tree.heading('#0',text='效果（中文名称）');self.tree.heading('duration',text='时长ms');self.tree.heading('peak',text='振幅峰值')
+        self.tree.heading('#0',text='效果 / 资源名称');self.tree.heading('duration',text='时长ms');self.tree.heading('peak',text='振幅峰值')
         self.tree.column('#0',width=int(310*scale),minwidth=180,stretch=True)
         self.tree.column('duration',width=int(72*scale),minwidth=65,stretch=False)
         self.tree.column('peak',width=int(80*scale),minwidth=70,stretch=False)
@@ -265,7 +323,7 @@ class Player:
         buttons=ttk.Frame(frame);buttons.grid(row=8,column=0,sticky='ew',pady=8)
         self.play=ttk.Button(buttons,text='▶ 播放选中效果',state='disabled',command=self.start);self.play.pack(side='left')
         ttk.Button(buttons,text='■ 停止 / Esc',command=self.stop).pack(side='left',padx=12)
-        ttk.Button(buttons,text='打开效果目录',command=lambda:os.startfile(CATALOG.parent/'catalog.md')).pack(side='left')
+        ttk.Button(buttons,text='打开效果目录',command=lambda:os.startfile(self.catalog_path.with_suffix('.md'))).pack(side='left')
         footer=ttk.Label(frame,text='场景标注仅采用已确认调用证据；未核实的剧情保留资源编号。波形不是手柄实测。')
         footer.grid(row=9,column=0,sticky='ew',pady=4)
         def fit(event):
@@ -287,9 +345,22 @@ class Player:
         root.bind('<Escape>',lambda e:self.stop());root.bind('<FocusOut>',lambda e:root.after(80,self.focus));root.protocol('WM_DELETE_WINDOW',self.close)
         self.filter();self.device=Device();self.poll()
 
+    def change_catalog(self,event=None):
+        self.catalog_path,self.data,self.entries=self.catalogs[self.game.get()]
+        self.update_strength_labels()
+        self.search.set('');self.filter()
+        self.status.set(self.game.get()+'：请选择效果，点击播放才震动')
+
+    def route_changed(self):
+        self.stop();self.draw()
+        self.status.set('回放位置已调整；点击播放才震动')
+
+    def playback_samples(self,entry):
+        return routed_samples(map_samples(entry['samples'],strength_percent=self.strength_percent(),base_gain=catalog_strength_gain(self.data)),self.route.get())
+
     def record(self,item):
         with (CATALOG.parent/'backtest-results.jsonl').open('a',encoding='utf-8') as f:
-            f.write(json.dumps(dict(timestamp=time.time(),**item),ensure_ascii=False)+'\n')
+            f.write(json.dumps(dict(timestamp=time.time(),game=self.game.get(),**item),ensure_ascii=False)+'\n')
 
     def filter(self):
         if hasattr(self,'device'):self.stop()
@@ -299,7 +370,7 @@ class Player:
         count=0
         for i,e in enumerate(self.entries):
             if needle and needle not in (effect_name(e)+' '+confirmed_scenes(e,self.data)+' '+json.dumps({k:v for k,v in e.items() if k not in ('samples','pattern')},ensure_ascii=False)).lower():continue
-            peak=max(row[1] for row in e['samples'])
+            peak=amplitude_peak(e['samples'])
             self.tree.insert('', 'end',iid=str(i),text=effect_name(e),values=(f"{e['duration_ms']:.0f}",f'{peak:.5f}'))
             count+=1
         self.count.set(f'{count} / {len(self.entries)} 项')
@@ -315,25 +386,34 @@ class Player:
     def draw(self):
         self.plot.delete('all')
         if not self.current:return
-        mapped=map_samples(self.current['samples'],PROFILES[self.mapping.get()],self.strength_percent())
+        mapped=self.playback_samples(self.current)
         peak=max(max(r[i] for i in (1,3,5,7)) for r in self.current['samples'])
         output=max(max(r[i] for i in (1,3,5,7)) for r in mapped)
-        self.mapping_info.set(f'峰值 {peak:.5f} → {output:.5f}；实验曲线未标定')
-        samples=self.current['samples'];w,h=self.plot.winfo_width(),self.plot.winfo_height();duration=max(1,samples[-1][0]);points=[]
-        for row in samples:points.extend((10+(w-20)*row[0]/duration,h-20-(h-40)*row[1]))
-        if len(points)>=4:self.plot.create_line(*points,fill='#b49aff',width=2)
-        points=[]
-        for row in mapped:points.extend((10+(w-20)*row[0]/duration,h-20-(h-40)*row[1]))
-        if len(points)>=4:self.plot.create_line(*points,fill='#52dbbf',width=2,dash=(4,3))
-        self.plot.create_text(12,12,anchor='nw',fill='white',text='低频振幅：紫=原始，绿虚线=输出（0–1）')
+        self.amplitude_info.set(f'峰值 {peak:.5f} → {output:.5f}；仅应用强度缩放，达到上限时保持两分量比例')
+        samples=self.current['samples'];w,h=self.plot.winfo_width(),self.plot.winfo_height();duration=max(1,samples[-1][0])
+        # Two components are meaningful for BNVIB; audition routing does not
+        # change the original single-device waveform shown here.
+        for component,color,output_color in ((1,'#b49aff','#52dbbf'),(3,'#ffb36b','#ff789e')):
+            for rows,ink,dash in ((samples,color,None),(mapped,output_color,(4,3))):
+                points=[]
+                for row in rows:
+                    amplitude=row[component] if dash is None else max(row[component],row[component+4])
+                    points.extend((10+(w-20)*row[0]/duration,h-20-(h-52)*amplitude))
+                if len(points)>=4:self.plot.create_line(*points,fill=ink,width=2,**({'dash':dash} if dash else {}))
+        self.plot.create_text(12,10,anchor='nw',fill='white',text='原始：低频紫 / 高频橙；输出：低频绿 / 高频粉（虚线，0–1）')
 
     def strength_percent(self):
         return max(0,min(100,round(self.strength.get())))
 
+    def update_strength_labels(self):
+        gain=catalog_strength_gain(self.data)
+        self.strength_text.set(f'{self.strength_percent()}% · {gain*self.strength_percent()/100:g}×')
+        self.strength_hint.set('100% 原始强度 · 不额外放大' if gain==1 else '100% 五倍请求 · 20% 原始强度')
+
     def strength_changed(self,value=None):
-        self.strength_text.set(f'{self.strength_percent()}%')
+        self.update_strength_labels()
         self.stop()
-        self.status.set('强度已调整；点击播放测试。0% 静音，10% 原始强度，100% 十倍请求。')
+        self.status.set('强度已调整；点击播放测试。'+self.strength_hint.get())
         if self.strength_redraw is None:
             self.strength_redraw=self.root.after(16,self.redraw_strength)
 
@@ -343,21 +423,16 @@ class Player:
     def reset_strength(self):
         self.strength.set(50);self.strength_changed()
 
-    def mapping_changed(self,event=None):
-        self.stop();self.draw()
-        self.status.set('映射已切换；点击播放对比。实验曲线不是已标定的原版震感。')
-
     def start(self):
         if self.ready and self.current:
+            gain=catalog_strength_gain(self.data)
             device=next((d for d in self.devices if d['id']==self.selected_device),None)
-            drive=PROFILES[self.mapping.get()]
-            if drive!=1 and (not device or (device['vendor'],device['product'])!=(0x057e,0x2069)):
-                self.status.set('实验增强仅用于 Switch 2 Pro；其他设备请选择原始映射。');return
-            entry=dict(self.current,samples=map_samples(self.current['samples'],drive,self.strength_percent()))
+            strength=self.strength_percent()
+            entry=dict(self.current,samples=self.playback_samples(self.current))
             validate_samples(entry['samples'])
-            self.device.commands.put(('play',{'entry':entry,'device_id':self.selected_device,'mapping':self.mapping.get(),'drive':drive,'strength_percent':self.strength_percent(),'base_strength_gain':BASE_STRENGTH_GAIN}))
-            self.status.set('正在回放：'+effect_name(self.current)+' · '+self.mapping.get()+f' · {self.strength_percent()}%')
-            self.record({'event':'start','id':self.current['id'],'device':device,'mapping':self.mapping.get(),'drive':drive,'strength_percent':self.strength_percent(),'base_strength_gain':BASE_STRENGTH_GAIN})
+            self.device.commands.put(('play',{'entry':entry,'device_id':self.selected_device,'strength_percent':strength,'base_strength_gain':gain}))
+            self.status.set('正在回放：'+effect_name(self.current)+f' · 强度 {strength}%（{gain*strength/100:g}×）')
+            self.record({'event':'start','id':self.current['id'],'device':device,'strength_percent':strength,'base_strength_gain':gain,'audition_route':self.route.get()})
 
     def refresh_devices(self):
         self.ready=False;self.play.configure(state='disabled');self.status.set('正在刷新设备…')

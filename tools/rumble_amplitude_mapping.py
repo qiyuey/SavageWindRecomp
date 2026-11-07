@@ -1,29 +1,26 @@
-"""Uncalibrated target-device tuning, not an official HD1-to-HD2 transfer curve."""
+"""Single strength control for local rumble playback; no extra device-tuning curve."""
 import math
 
-BASE_STRENGTH_GAIN = 10.0
-
-PROFILES = {
-    '线性映射（不额外增强）': 1.0,
-    '弱信号增强 · 轻（实验）': 2.0,
-    '弱信号增强 · 中（实验）': 4.0,
-    '弱信号增强 · 强（实验）': 8.0,
-}
+BASE_STRENGTH_GAIN = 5.0
 
 
-def map_samples(samples, drive=1.0, strength_percent=100):
-    """Smooth bounded expansion; one shared gain per side preserves its band ratio.
+def catalog_strength_gain(data):
+    """User-selected audition scales, not hardware capability detection."""
+    return 1.0 if data.get('game') == 'oot' else BASE_STRENGTH_GAIN
 
-    For dominant amplitude m, output = drive*m/(1+(drive-1)*m).
-    All profiles share zero and full-scale endpoints. No event normalization,
-    extra carrier, minimum floor, onset kick or duration modification is applied.
-    drive is an experimental curve parameter, not a measured hardware gain.
+
+def map_samples(samples, strength_percent=100, base_gain=BASE_STRENGTH_GAIN):
+    """Scale by the catalog's full-strength gain (BOTW 5x; Ocarina 1x).
+
+    Timing and frequencies are unchanged. Saturation uses one shared gain per
+    side, preserving the low/high amplitude ratio instead of clipping each band
+    independently. There is no nonlinear weak-signal boost after this scale.
     """
-    if not math.isfinite(drive) or not 1 <= drive <= 8:
-        raise ValueError('Invalid amplitude curve')
     if not math.isfinite(strength_percent) or not 0 <= strength_percent <= 100:
         raise ValueError('Invalid strength percentage')
-    strength=BASE_STRENGTH_GAIN*strength_percent/100
+    if not math.isfinite(base_gain) or base_gain <= 0:
+        raise ValueError('Invalid base strength gain')
+    strength=base_gain*strength_percent/100
     result=[]
     for sample in samples:
         row=list(sample)
@@ -31,12 +28,7 @@ def map_samples(samples, drive=1.0, strength_percent=100):
             a,b=row[low],row[high]
             if not all(math.isfinite(v) and 0 <= v <= 1 for v in (a,b)):
                 raise ValueError('Invalid amplitude')
-            # Apply user strength before device tuning; shared saturation keeps
-            # the two bands in proportion even when one reaches full scale.
             scale=strength/max(1.0,max(a,b)*strength)
-            a*=scale;b*=scale
-            peak=max(a,b)
-            gain=drive/(1+(drive-1)*peak)
-            row[low]=a*gain;row[high]=b*gain
+            row[low]=a*scale;row[high]=b*scale
         result.append(row)
     return result

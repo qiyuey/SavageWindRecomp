@@ -1,11 +1,20 @@
 """The spike must fall back as a group if even one pattern fails on a known build."""
 import game_sites as gs
+from unittest.mock import patch
+
+
+def resolve_options(main):
+    # This fixture models Options addresses, not instruction bytes. The local
+    # Betop byte/relationship validator has its own synthetic fixture tests.
+    with patch.object(gs, 'validate_betop_state'):
+        return gs.resolve(main, gs.KNOWN['1.9.0'])
+
 
 class MissingPattern:
     def locate(self, site):
         return (None, 0) if site.name == gs.OPT_TWO_SITES[-1] else (gs.KNOWN['1.9.0'].get(site.name), 1)
 
-found = gs.resolve(MissingPattern(), gs.KNOWN['1.9.0'])
+found = resolve_options(MissingPattern())
 assert not set(gs.OPT_TWO_SITES) & found.keys(), 'a KNOWN address must not enable an unverified spike'
 assert found['opt_decide'] == gs.KNOWN['1.9.0']['opt_decide'], 'existing Options handling survives'
 print('two-button sites: one failed pattern disables the whole spike PASS')
@@ -16,5 +25,5 @@ for missing in gs.OPT_TWO_SITES:
         class OneBadSite:
             def locate(self, site):
                 return (wrong, hits) if site.name == missing else (gs.KNOWN['1.9.0'].get(site.name), 1)
-        assert not set(gs.OPT_TWO_SITES) & gs.resolve(OneBadSite(), gs.KNOWN['1.9.0']).keys()
+        assert not set(gs.OPT_TWO_SITES) & resolve_options(OneBadSite()).keys()
 print('all spike sites: missing, ambiguous and mismatched signatures fall back PASS')
