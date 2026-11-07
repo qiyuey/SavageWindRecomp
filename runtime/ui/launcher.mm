@@ -574,6 +574,10 @@ static void *extract_thread(void *) {
     bool unusable = false;  // (game packages rather than its files)
     bool dlc_only = false;  // (the shaders precompiled are the game's: nothing new to precompile)
     if (src.empty() && check_copied_files(g_root).empty()) {  // copied already (an update needs new game code)
+        if (check_game_files(g_root).empty()) {
+            set_job("Game files ready.");
+            goto done;
+        }
         g_copy_skipped = true;
         if (!build_game_code()) goto done;
         goto check;
@@ -1457,8 +1461,7 @@ extern "C" void launcher_run(const char *root, int mode) {
                 if (!job.empty())
                     ex_d += std::string("\n\n") + trv(job) + (job_hint.empty() ? "" : std::string(".\n") + trv(job_hint));
                 std::string again_d = tr("Sets the game files up again from the folder chosen above, in place of Savage Wind's "
-                                         "copy. With no folder chosen, builds the game code again from Savage Wind's copy. "
-                                         "Saves and settings are kept.");
+                                         "copy. Saves and settings are kept.");
 
                 // the controller's cursor starts on the first row (not the X), a few frames while the window lays out
                 static int seen_frame = -10, focus_first;  // (not drawn last frame: the window has just opened)
@@ -1494,18 +1497,10 @@ extern "C" void launcher_run(const char *root, int mode) {
                         }
                         if (opt_action("Cancel", "", "Keeps the game files.", true)) g_confirm_delete = false;
                     }
-                    if (!g_confirm_delete) {  // the DLC set up (added from the folder chosen below), and removing it
+                    if (!g_confirm_delete) {
                         std::string dl = dlc_installed(g_root);
                         opt_section("Downloadable content");
-                        if (dl.empty()) opt_disable_next();
-                        if (opt_action("Remove downloadable content", dl.empty() ? tr("Not set up") : dl.c_str(),
-                                       tr("The Master Trials and The Champions' Ballad, from your own copy of them. To add "
-                                          "them, choose the folder with their extracted RomFS (or the game's folder, if "
-                                          "they're in it) below and set up. Removing them keeps your saves."), true)) {
-                            g_file_size.invalidate();
-                            remove_dlc(g_root);
-                            set_job("Downloadable content removed.");
-                        }
+                        ImGui::TextUnformatted(dl.empty() ? tr("Not set up") : dl.c_str());
                     }
 #ifndef __APPLE__
                     if (!g_confirm_delete && shader_precompile_available()) {  // all the shaders, now (or again)
@@ -1574,9 +1569,11 @@ extern "C" void launcher_run(const char *root, int mode) {
                         }
                     }
 #endif
-                    if (busy || (src.empty() && !check_copied_files(g_root).empty())) opt_disable_next();
-                    if (opt_action("Set up game files", busy ? tr("Working...") : "", ready ? again_d.c_str() : ex_d.c_str(),
-                                   true)) {
+                    bool setup_ready = ready && src.empty();
+                    if (busy || setup_ready || (src.empty() && !check_copied_files(g_root).empty())) opt_disable_next();
+                    const char *setup_value = busy ? tr("Working...") : setup_ready ? tr("Ready") : "";
+                    const char *setup_desc = setup_ready ? tr("Game files ready.") : ready ? again_d.c_str() : ex_d.c_str();
+                    if (opt_action("Set up game files", setup_value, setup_desc, true)) {
                         settings_save();  // (the colour look as chosen above)
                         g_file_size.set_suspended(true);
                         pthread_mutex_lock(&g_lock);
