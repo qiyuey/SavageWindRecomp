@@ -1,6 +1,7 @@
 // User settings (savagewind.ini in the data root, runtime/paths.h), edited from the in-game menu.
 #pragma once
 #include <stdbool.h>
+#include "rumble_strength.h"
 
 // Upscalers (Video > Upscaler; runtime/nvn/output_scale.c): Off renders at the window's size; the others render
 // smaller by their quality mode's factor and scale up to the window. DLSS is listed as coming later.
@@ -100,7 +101,7 @@ typedef struct {
     bool fps_display;    // Frame rate > Match display: fps_limit follows the display (settings_fps_for_display)
     int vsync;           // VSYNC_*
     bool rumble;         // controller vibration
-    int rumble_strength; // vibration intensity percent: 10..100 (default 100)
+    int rumble_strength; // 0..100%, base gain 5; default 50 (original amplitude x2.5)
     bool freecam_sticks; // both stick clicks together turn the free camera on and off (hle/input.c)
     int gpu;             // Vulkan adapter index from the startup log; -1: automatic (restart required)
     bool quick_drop;      // native dropping from the quick equipment selector
@@ -172,9 +173,6 @@ typedef struct {
     bool menu_tip_seen;  // the start screen's one-time "how to open the menu" note was shown (first PLAY ever)
 } Settings;
 
-#define RUMBLE_STRENGTH_MIN 10
-#define RUMBLE_STRENGTH_MAX 100
-#define RUMBLE_STRENGTH_DEFAULT 100
 #define STICK_CAM_MIN 100      // (Controller camera speed, percent, in steps of 25; 200 to start with)
 #define STICK_CAM_MAX 600
 #define STICK_CAM_DEFAULT 200

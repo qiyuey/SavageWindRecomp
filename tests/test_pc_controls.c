@@ -230,3 +230,6 @@ int main(void) {
     assert(photo_takes == shots_before + 1);
     puts("PASS: PrintScreen triggers screenshot capture");
 }
+
+void vibration_detach(SDL_Gamepad *p) { (void)p; }
+void vibration_shutdown(void) {}

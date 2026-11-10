@@ -47,7 +47,7 @@ The game files page tells you when the DLC is merged.
 The setup tells the game's RomFS (it has `System/Version.txt`) from a DLC's (`System/AocVersion.txt`) and copies the
 DLC as `aoc1/` and `aoc2/` into the data folder. A folder the game reads in place (an `extracted/` folder next to the
 program) is not copied, so there the DLC folders must already be named `aoc1/` and `aoc2/`. The game files page shows the DLC set
-up (for example "1 + 2 (3.0)") and removes it; your saves stay.
+up (for example "1 + 2 (3.0)").
 
 The DLC are optional: the whole game plays without them. What you get depends on what you set up:
 

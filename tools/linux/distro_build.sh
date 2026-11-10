@@ -1,7 +1,7 @@
 #!/bin/sh
 # Build the app (start screen only, no game code) natively in each distribution's container. What differs between
-# distributions is exactly what a container reproduces: package names, whether SDL3 / FFmpeg / shaderc exist as
-# packages and what their libraries are called (libshaderc.so vs libshaderc_shared.so), lld, and the clang version
+# distributions is exactly what a container reproduces: package names, FFmpeg and shaderc libraries
+# (libshaderc.so vs libshaderc_shared.so), lld, and the clang version
 # (the lifted FP code needs __builtin_elementwise_*). A virtual machine per distribution would test the same thing
 # an order of magnitude slower; QEMU matters for other CPU architectures (the aarch64 AppImage), not for this.
 #
@@ -18,31 +18,34 @@ ENGINE=${ENGINE:-$(command -v podman || command -v docker)}
 JOBS=${JOBS:-$(nproc)}
 PLATFORM=--platform=linux/amd64
 
-# Every distribution here has all its dependencies in its own archives, as the app needs them (see docs/linux.md).
-# Ubuntu 24.04 LTS and older, Debian 12 and openSUSE Leap are not in the list: no SDL3 package (build SDL3 from
-# source, or use the AppImage).
+# Keep this list aligned with the distributions tested by the Linux CI workflow.
 DISTROS="debian:13 ubuntu:26.04 fedora:44 archlinux:latest opensuse/tumbleweed:latest"
 
 deps_for() {
     case $1 in
-        debian*|ubuntu*)  # SDL3 3.2+, clang 19+ / 20+, libshaderc.so; the image's docker-clean deletes the .debs
+        debian*|ubuntu*)  # clang 19+ / 20+, libshaderc.so; the image's docker-clean deletes the .debs
             echo 'rm -f /etc/apt/apt.conf.d/docker-clean; apt-get update -qq; \
                 apt-get install -y -qq --no-install-recommends make clang lld pkg-config \
-                libsdl3-dev libavformat-dev libavcodec-dev libavutil-dev libswscale-dev \
+                ca-certificates curl cmake ninja-build libusb-1.0-0-dev \
+                libavformat-dev libavcodec-dev libavutil-dev libswscale-dev \
                 libvulkan-dev libshaderc-dev zlib1g-dev' ;;
-        fedora*)          # SDL3-devel, libshaderc-devel, FFmpeg as the "free" variant
-            echo 'dnf install -y -q --setopt=keepcache=True \
-                make clang lld pkgconf-pkg-config SDL3-devel libshaderc-devel vulkan-loader-devel zlib-devel \
+        fedora*)          # libshaderc-devel, FFmpeg as the "free" variant
+            # Fedora's stub provides the link-time ABI without downloading from Cisco.
+            echo 'dnf install -y -q --disable-repo=fedora-cisco-openh264 --setopt=keepcache=True \
+                make clang lld pkgconf-pkg-config libshaderc-devel vulkan-loader-devel zlib-devel \
+                ca-certificates curl-minimal tar gzip cmake ninja-build libusb1-devel \
                 ffmpeg-free-devel libavformat-free-devel libavcodec-free-devel libavutil-free-devel \
-                libswscale-free-devel' ;;
+                libswscale-free-devel noopenh264' ;;
         arch*)
             echo 'pacman -Syu --noconfirm --quiet --needed \
-                base-devel clang lld sdl3 shaderc vulkan-icd-loader vulkan-headers ffmpeg zlib' ;;
-        opensuse*)        # Tumbleweed: libavformat-devel is its FFmpeg (headers in /usr/include/ffmpeg), SDL3 as SDL3-devel
+                base-devel clang lld shaderc vulkan-icd-loader vulkan-headers ffmpeg zlib \
+                ca-certificates curl cmake ninja libusb' ;;
+        opensuse*)        # Tumbleweed: FFmpeg headers are in /usr/include/ffmpeg
             echo 'zypper -q modifyrepo --all --keep-packages; \
                 zypper -q --non-interactive --gpg-auto-import-keys refresh; \
                 zypper -q --non-interactive install --no-recommends \
-                make clang lld pkgconf-pkg-config SDL3-devel shaderc-devel vulkan-devel zlib-devel \
+                make clang lld gcc-c++ pkgconf-pkg-config shaderc-devel vulkan-devel zlib-devel \
+                ca-certificates curl tar gzip cmake ninja libusb-1_0-devel \
                 libavformat-devel libavcodec-devel libavutil-devel libswscale-devel' ;;
         *) return 2 ;;
     esac
@@ -72,8 +75,13 @@ for image in $images; do
     [ "${PKG_CACHE:-1}" = 0 ] || cache="-v $volume:$(cache_dir_for "$image")"
     if "$ENGINE" run --rm $PLATFORM -v "$REPO":/src:ro $cache -w /src \
             -e SW_INSTALL="$install" -e JOBS="$JOBS" "$image" \
-            sh -c 'eval "$SW_INSTALL" || exit 1; make -j"$JOBS" B=/tmp/build GEN=/nonexistent || exit 1; \
-                   ldd /tmp/build/savagewind | grep -E "SDL3|avformat|shaderc"' \
+            sh -ec 'eval "$SW_INSTALL"
+                    sh tools/build_ci_sdl.sh /tmp/ci-sdl -DSDL_UNIX_CONSOLE_BUILD=ON -DSDL_X11=OFF -DSDL_WAYLAND=OFF
+                    sdl=/tmp/ci-sdl/install
+                    make -j"$JOBS" B=/tmp/build GEN=/nonexistent SDL3_ROOT="$sdl"
+                    LD_LIBRARY_PATH="$sdl/lib" ldd /tmp/build/savagewind > /tmp/savagewind-libraries
+                    grep -F "=> $sdl/lib/libSDL3.so" /tmp/savagewind-libraries
+                    grep -E "avformat|shaderc" /tmp/savagewind-libraries' \
             > "$log" 2>&1 < /dev/null; then
         echo "=== $image OK"
         grep -E "SDL3|avformat|shaderc" "$log" | sed "s/^/    /"

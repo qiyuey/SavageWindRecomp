@@ -400,6 +400,7 @@ void settings_load(void) {
         LOG("[settings] %s: version %d async_shaders 0 -> 1 (the new default)\n", SETTINGS_FILE, version);
     }
     if (!tip_key) g_settings.menu_tip_seen = true;  // (a settings file from before the note: not a first launch)
+    g_settings.rumble_strength = rumble_strength_percent(g_settings.rumble_strength);
     if (g_settings.volume < 0) g_settings.volume = 0;
     if (g_settings.volume > 2) g_settings.volume = 2;
     if (g_settings.shrine_sensor_volume < 0) g_settings.shrine_sensor_volume = 0;
@@ -433,7 +434,6 @@ void settings_load(void) {
     g_settings.color_lut_strength = CLAMP(g_settings.color_lut_strength, 0, 100);
     g_settings.stick_cam_x = CLAMP(g_settings.stick_cam_x, STICK_CAM_MIN, STICK_CAM_MAX);
     g_settings.stick_cam_y = CLAMP(g_settings.stick_cam_y, STICK_CAM_MIN, STICK_CAM_MAX);
-    g_settings.rumble_strength = CLAMP(g_settings.rumble_strength, RUMBLE_STRENGTH_MIN, RUMBLE_STRENGTH_MAX);
     g_settings.weapon_wear = CLAMP(g_settings.weapon_wear, WEAPON_WEAR_MIN, WEAPON_WEAR_MAX);
     if (g_settings.no_weapon_wear) g_settings.weapon_wear = 0;  // (Unbreakable weapons is Weapon wear's Fairy, 0x)
 #undef CLAMP

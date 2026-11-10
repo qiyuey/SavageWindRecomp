@@ -28,6 +28,7 @@
 #include "fsr_api.h"
 #include "../output_scale.h"
 #include "../renderer.h"
+#include "../../vibration.h"
 #include "dlss.h"
 
 #ifdef _WIN32  // (kernel32; windows.h itself clashes with names used here)
@@ -2514,7 +2515,7 @@ static void present_locked(NvnTexture *t) {
         }
         vk_frame_end(shot ? "build/window.png" : wpath[0] ? wpath : fg_real_shot[0] ? fg_real_shot : NULL);
         fg_real_shot[0] = 0;
-        if (shot && getenv("SAVAGEWIND_EXIT_AFTER_SHOT")) { fflush(stderr); _exit(0); }
+        if (shot && getenv("SAVAGEWIND_EXIT_AFTER_SHOT")) { input_shutdown(); fflush(stderr); _exit(0); }
     } else {
         renderer_submit();
     }
@@ -2547,6 +2548,7 @@ presented:
         static long exit_at = -1;
         if (exit_at < 0) exit_at = getenv("SAVAGEWIND_EXIT_AT") ? atol(getenv("SAVAGEWIND_EXIT_AT")) : 0;
         if (exit_at && (long)script_frame >= exit_at) {
+            input_shutdown();
 #ifdef SW_PGO_GENERATE
             // The scripted exit skips atexit, so finish the runtime training profile explicitly.
             write_runtime_profile();
@@ -2720,7 +2722,7 @@ presented:
                  (unsigned long long)total_frames);
         renderer_save_texture_tex(b, path);
         // a series (SCREENSHOT_FROM) runs on until SAVAGEWIND_WINDOW_SHOT exits
-        if (getenv("SAVAGEWIND_EXIT_AFTER_SHOT") && !shot_from) { fflush(stderr); _exit(0); }
+        if (getenv("SAVAGEWIND_EXIT_AFTER_SHOT") && !shot_from) { input_shutdown(); fflush(stderr); _exit(0); }
     }
     double now = SDL_GetTicks() / 1000.0;
     static double fps_iv = -1, prev_present, max_gap;
@@ -2761,6 +2763,7 @@ void vk_shaders_init(void);
 // exit() from any thread: let the GPU finish, keep the pipeline cache, then end the process without the DLL
 // teardown (driver / validation-layer threads can stall it for minutes while the game's threads still run).
 static void quick_exit_handler(void) {
+    vibration_exit();
     static int trace = -1;
     if (trace < 0) trace = getenv("SAVAGEWIND_VK_TRACE") != NULL;
     if (trace) LOG("[vk] exit: waiting for the GPU\n");

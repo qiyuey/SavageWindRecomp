@@ -77,7 +77,7 @@ GAMELIB_LDFLAGS := -dynamiclib -undefined dynamic_lookup  # (the runtime functio
 GAMELIB_SHARED := -shared -Wl,-undefined,dynamic_lookup  # (the same, for the start screen's build: zig cc)
 else ifeq ($(PLATFORM),linux)
 EXE      := $(B)/savagewind
-DEPINC   := $(if $(DEPS),-I$(DEPS)/include,$(shell pkg-config --cflags libavformat 2>/dev/null))  # (openSUSE has them in /usr/include/ffmpeg)
+DEPINC   := $(if $(SDL3_ROOT),-I$(SDL3_ROOT)/include) $(if $(DEPS),-I$(DEPS)/include,$(shell pkg-config --cflags libavformat 2>/dev/null))  # (openSUSE has them in /usr/include/ffmpeg)
 ifeq ($(ARCH),x86_64)
 GENARCH  ?= -march=x86-64-v3  # as on Windows: AVX2 + FMA for the lifted FP/SIMD code (checked at startup)
 GENARCH_COMPAT ?= -march=x86-64-v2  # CPUs without them (GAMELIB_ID_COMPAT below)
@@ -96,7 +96,7 @@ SHADERC  ?= $(if $(DEPS),-lshaderc_shared,$(or $(shell pkg-config --libs shaderc
              $(shell echo '$(SHADERC_TEST)' | $(CC) -x c - -lshaderc_shared -o /dev/null 2>/dev/null && echo -lshaderc_shared),\
              $(shell echo '$(SHADERC_TEST)' | $(CC) -x c - -lshaderc -o /dev/null 2>/dev/null && echo -lshaderc),-lshaderc))
 # -rdynamic: crash backtraces name host functions (runtime/platform/linux.c)
-LDFLAGS  := -fuse-ld=lld -rdynamic $(if $(DEPS),-L$(DEPS)/lib) -lSDL3 -lavformat -lavcodec -lavutil -lswscale \
+LDFLAGS  := -fuse-ld=lld -rdynamic $(if $(SDL3_ROOT),-L$(SDL3_ROOT)/lib) $(if $(DEPS),-L$(DEPS)/lib) -lSDL3 -lavformat -lavcodec -lavutil -lswscale \
             -lvulkan $(SHADERC) -lz -lpthread -ldl -lm
 BACKEND_SRC := $(wildcard runtime/nvn/vulkan/*.c) $(wildcard runtime/nvn/vulkan/*.cpp)
 BACKEND_OBJ := $(patsubst runtime/%.cpp,$(B)/rt/%.o,$(patsubst runtime/%.c,$(B)/rt/%.o,$(BACKEND_SRC)))
@@ -107,16 +107,26 @@ GAMELIB_LDFLAGS := -shared -fuse-ld=lld  # (the runtime functions it calls: the 
 GAMELIB_SHARED := -shared
 else
 EXE      := $(B)/savagewind.exe
-DEPINC   := $(if $(DEPS),-I$(DEPS)/include)
+SDL3_ROOT ?= ../SDL3
+SDL3_LIBDIR ?= $(SDL3_ROOT)/build/windows-x64-release/Release
+SDL3_LIB ?= $(SDL3_LIBDIR)/SDL3.lib
+SDL3_DLL ?= $(SDL3_LIBDIR)/SDL3.dll
+SDL3_USB_DLL ?= $(shell command -v libusb-1.0.dll 2>/dev/null)
+RELEASE  ?= 1
+WIN_SUBSYSTEM := $(if $(filter-out 0,$(RELEASE)),windows,console)
+# Relink the executable when switching between GUI and console builds in the same directory.
+WIN_SUBSYSTEM_STAMP := $(B)/windows_subsystem
+$(shell mkdir -p $(B) && [ "$$(cat $(WIN_SUBSYSTEM_STAMP) 2>/dev/null)" = '$(WIN_SUBSYSTEM)' ] || echo '$(WIN_SUBSYSTEM)' > $(WIN_SUBSYSTEM_STAMP))
+DEPINC   := -I$(SDL3_ROOT)/include $(if $(DEPS),-I$(DEPS)/include)
 OSFLAGS  := -D_FILE_OFFSET_BITS=64 -D_POSIX_THREAD_SAFE_FUNCTIONS -D_CRT_RAND_S -DWIN32_LEAN_AND_MEAN -DNOMINMAX
 GENARCH  ?= -march=x86-64-v3  # AVX2 + FMA for the lifted FP/SIMD code (simd.h)
 GENARCH_COMPAT ?= -march=x86-64-v2  # CPUs without them (GAMELIB_ID_COMPAT below)
 GENFLAGS += -D_FILE_OFFSET_BITS=64 $(GENARCH)
 # --stack: every thread's default stack, reserved (committed as it grows): 256 MB, the guest threads' recursion runs on
 # it (runtime/kernel.c thread_start)
-LDFLAGS  := -fuse-ld=lld -Wl,--stack,268435456 $(if $(DEPS),-L$(DEPS)/lib) -lSDL3 -lavformat -lavcodec -lavutil -lswscale \
+LDFLAGS  := -fuse-ld=lld -Wl,--stack,268435456 $(if $(DEPS),-L$(DEPS)/lib) $(SDL3_LIB) -lavformat -lavcodec -lavutil -lswscale \
             -lvulkan-1 -lwinmm -lole32 -lshell32 -lcomdlg32 -luuid -lshaderc_shared -lpdh -lws2_32 -l:libz.a \
-            $(if $(RELEASE),-Wl$(comma)--subsystem$(comma)windows)  # release: no console window (log -> savagewind.log)
+            -Wl,--subsystem,$(WIN_SUBSYSTEM)
 # NVIDIA DLSS is an optional external SDK. Keep proprietary files out of this
 # repository; source builds can point at the sibling checkout with DLSS_SDK=../DLSS.
 DLSS_SDK ?= ../DLSS
@@ -309,14 +319,29 @@ $(B)/rt/%.o: runtime/%.m $(RT_HDRS)
 # linked to a temp file, then renamed over: a copy of the game still running keeps its (old) file - relinking in
 # place gets running copies killed by macOS (code signature of the changed pages). The temp file keeps the real name
 # (in a folder of its own): on Windows the import library records the name the game code library loads it by.
-$(EXE): $(RT_OBJ) $(BACKEND_OBJ) $(UI_OBJ) $(IMGUI_OBJ) $(if $(wildcard $(DLSS_DLL)),$(DLSS_IMPORT) $(DLSS_LIB))
+$(EXE): $(RT_OBJ) $(BACKEND_OBJ) $(UI_OBJ) $(IMGUI_OBJ) $(if $(wildcard $(DLSS_DLL)),$(DLSS_IMPORT) $(DLSS_LIB)) $(WIN_SUBSYSTEM_STAMP)
 	@mkdir -p $(dir $@)link
-	$(CXX) -o $(dir $@)link/$(notdir $@) $^ $(LDFLAGS)
+	$(CXX) -o $(dir $@)link/$(notdir $@) $(filter-out $(WIN_SUBSYSTEM_STAMP),$^) $(LDFLAGS)
 	mv -f $(dir $@)link/$(notdir $@) $@
 
+ifeq ($(PLATFORM),windows)
+$(EXE): | $(B)/SDL3.dll
+$(B)/SDL3.dll: $(SDL3_DLL)
+	@mkdir -p $(dir $@)
+	cp "$<" "$@"
+endif
+
 # its id file (<library>.id) says what it was built from without loading it (runtime/gamelib.c)
-$(GAMELIB): $(GEN_OBJ) | $(EXE)
-	$(CC) $(GAMELIB_LDFLAGS) -o $@.tmp $^
+
+# The generated game library has hundreds of object files. On Windows the
+# expanded linker command exceeds the shell's argument limit, so feed the
+# current object list through a response file. Old objects from a previous
+# generator layout must not be linked after chunks are renamed or removed.
+$(B)/swgame.rsp: $(GEN_OBJ) Makefile
+	$(file >$@,$(GEN_OBJ))
+
+$(GAMELIB): $(GEN_OBJ) $(B)/swgame.rsp | $(EXE)
+	$(CC) $(GAMELIB_LDFLAGS) -o $@.tmp @$(B)/swgame.rsp
 	mv -f $@.tmp $@
 	echo $(GAMELIB_ID) > $@.id
 
@@ -415,10 +440,12 @@ dist:
 	@! find tools -maxdepth 1 -name '*.py' -newer build/helper/swgen/swgen.exe | grep -q . || \
 	    { echo "make gen-helper first: tools/*.py changed since build/helper/swgen was frozen"; exit 1; }
 	@[ -x build/zig/zig.exe ] || { echo "tools/fetch_zig.sh first (the compiler)"; exit 1; }
+	@[ -f "$(SDL3_USB_DLL)" ] || { echo "Set SDL3_USB_DLL to the x64 libusb-1.0.dll path"; exit 1; }
 	$(MAKE) B=$(WIN_B) DEPS=$(CURDIR)/build/deps-win RELEASE=1 $(WIN_B)/savagewind.exe $(WIN_B)/savagewind-config.exe $(WIN_B)/sw-update.exe
 	! nm $(WIN_B)/savagewind.exe | grep ' f_70' >/dev/null  # (no game code inside)
 	rm -rf build/dist && mkdir -p "$(DIST)/gamelib-src"
 	cp $(WIN_B)/savagewind.exe $(WIN_B)/savagewind.dll.a "$(DIST)/"
+	cp "$(WIN_B)/SDL3.dll" "$(SDL3_USB_DLL)" "$(DIST)/"
 	cp $(WIN_B)/savagewind-config.exe "$(DIST)/Savage Wind Configuration.exe"
 	cp $(WIN_B)/sw-update.exe "$(DIST)/SW Update.exe"
 	tools/zig_slim.sh $(strip $(filter-out -Iruntime,$(GENFLAGS))) \
@@ -444,7 +471,7 @@ dist:
 		cp "$(DLSS_SDK)/lib/Windows_x86_64/rel/nvngx_dlss.dll" "$(DIST)/"; \
 		cp "$(DLSS_SDK)/LICENSE.txt" "$(DIST)/NVIDIA-DLSS-LICENSE.txt"; \
 	fi
-	PATH="$(CURDIR)/build/deps-win/bin:$$PATH" ldd $(WIN_B)/savagewind.exe | awk '(/ucrt64/ || /deps-win/) && !/vulkan-1/ {print $$3}' | sort -u | \
+	PATH="$(CURDIR)/build/deps-win/bin:$$PATH" ldd $(WIN_B)/savagewind.exe | awk '(/ucrt64/ || /deps-win/) && !/vulkan-1|SDL3\.dll/ {print $$3}' | sort -u | \
 	    xargs -I{} cp -u {} "$(DIST)/"
 	! ls "$(DIST)" | grep -iE 'x264|x265|xvid|postproc'  # (no GPL codec libraries in the release)
 	! ls "$(DIST)" | grep -i splash  # (no start screen picture: the player's own, never shipped)
@@ -527,6 +554,10 @@ $(B)/test_pc_settings: tests/test_pc_settings.c runtime/settings.c runtime/setti
 	@mkdir -p $(dir $@)
 	$(CC) -O1 -DSDL_STATIC_LIB $(OSFLAGS) $(DEPINC) -Iruntime -o $@ $< -lSDL3 -lm
 
+$(B)/test_rumble_settings: tests/test_rumble_settings.c runtime/settings.c runtime/settings.h runtime/rumble_strength.h runtime/hle/bindings.c
+	@mkdir -p $(dir $@)
+	$(CC) -O1 -DSDL_STATIC_LIB $(OSFLAGS) $(DEPINC) -Iruntime -o $@ $< -lSDL3 -lm
+
 $(B)/test_gpu_settings: tests/test_gpu_settings.c runtime/settings.c runtime/settings.h runtime/gpu_select.h runtime/hle/bindings.c
 	@mkdir -p $(dir $@)
 	$(CC) -O1 -DSDL_STATIC_LIB $(OSFLAGS) $(DEPINC) -Iruntime -o $@ $< -lSDL3 -lm
@@ -603,12 +634,22 @@ test-window-size: $(B)/test_window_size
 
 .PHONY: test-window-size
 
-$(B)/test_vibration: tools/test_vibration.c runtime/hle/vibration.c runtime/vibration.h runtime/settings.h runtime/services/hid_set.c
+$(B)/test_vibration: tools/test_vibration.c runtime/hle/vibration.c runtime/vibration.h runtime/settings.h runtime/rumble_strength.h runtime/services/hid_set.c
 	@mkdir -p $(B)
 	$(CC) -O1 -DSDL_STATIC_LIB $(OSFLAGS) $(DEPINC) -Iruntime -o $@ tools/test_vibration.c -lpthread -lm
 
-test-vibration: $(B)/test_vibration
+$(B)/test_vibration_worker: tools/test_vibration_worker.c tools/test_vibration.c runtime/hle/vibration.c runtime/vibration.h runtime/settings.h runtime/rumble_strength.h runtime/services/hid_set.c
+	@mkdir -p $(B)
+	$(CC) -O1 -DSDL_STATIC_LIB $(OSFLAGS) $(DEPINC) -Iruntime -o $@ tools/test_vibration_worker.c -lpthread -lm
+
+# Explicit opt-in device test: run build/test_vibration_device --play.
+$(B)/test_vibration_device: tools/test_vibration_device.c runtime/hle/vibration.c runtime/vibration.h runtime/settings.h runtime/rumble_strength.h
+	@mkdir -p $(B)
+	$(CC) -O1 -DSDL_STATIC_LIB $(OSFLAGS) $(DEPINC) -Iruntime -o $@ $< $(if $(filter windows,$(PLATFORM)),$(SDL3_LIB),$(if $(SDL3_ROOT),-L$(SDL3_ROOT)/lib) -lSDL3) -lpthread -lm
+
+test-vibration: $(B)/test_vibration $(B)/test_vibration_worker
 	$(B)/test_vibration
+	$(B)/test_vibration_worker
 
 .PHONY: test-vibration
 
@@ -780,13 +821,13 @@ test-hour: $(B)/test_hour
 
 .PHONY: test-hour
 
-# The BC5 view format (NVN 0x4C, SAVAGEWIND_BC5_UNORM): vk_format is the only function the section GC keeps from
-# textures.c, so no Vulkan device is needed. Run twice so both initial environment states cache the right format.
+# The BC5 format lookup is shared with textures.c. Link no image backend: PE/COFF
+# retains its external-data reference sections even with section GC. Test both initial environment states.
 ifneq ($(PLATFORM),macos)
-$(B)/test_textures_format: tests/test_textures_format.c runtime/nvn/vulkan/textures.c $(RT_HDRS)
+$(B)/test_textures_format: tests/test_textures_format.c runtime/nvn/vulkan/texture_formats.h
 	@mkdir -p $(dir $@)
 	$(CC) -O2 -ffunction-sections -fdata-sections $(OSFLAGS) $(DEPINC) -Iruntime -Iruntime/nvn -isystem third_party -isystem third_party/stb \
-	    -o $@ tests/test_textures_format.c runtime/nvn/vulkan/textures.c -fuse-ld=lld -Wl,--gc-sections \
+	    -o $@ tests/test_textures_format.c -fuse-ld=lld -Wl,--gc-sections \
 	    $(if $(filter windows,$(PLATFORM)),-Wl$(comma)--exclude-all-symbols) -lpthread -lm
 
 test-textures: $(B)/test_textures_format

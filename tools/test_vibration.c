@@ -1,20 +1,58 @@
 // Synthetic HID -> SDL checks, with no game files or physical controller. make test-vibration
+#define VIBRATION_TEST
+#ifndef VIBRATION_WORKER_TEST
+#define VIBRATION_MANUAL_TEST
+#endif
 #include <assert.h>
 #include <stdio.h>
 #include "../runtime/hle/vibration.c"
 #include "../runtime/services/hid_set.c"
 
-Settings g_settings = {.rumble = true, .rumble_strength = 100};
+Settings g_settings = {.rumble = true, .rumble_strength = 20};
 
 static uint64_t now;
 static unsigned calls;
 static uint16_t motor_low, motor_high;
 static uint32_t duration;
-Uint64 SDL_GetTicks(void) { return now; }
-bool SDL_RumbleGamepad(SDL_Gamepad *pad, Uint16 low, Uint16 high, Uint32 ms) {
+static VibrationValue bands[2];
+static unsigned failures, joystick_updates;
+static bool check_stereo, stall_output, output_entered;
+static pthread_cond_t test_output_gate = PTHREAD_COND_INITIALIZER;
+void SDL_UpdateJoysticks(void) { pthread_mutex_lock(&lock); ++joystick_updates; pthread_mutex_unlock(&lock); }
+static uint64_t call_times[4096];
+bool SDL_SetHintWithPriority(const char *name, const char *value, SDL_HintPriority priority) { return true; }
+Uint64 SDL_GetTicksNS(void) {
+#ifdef VIBRATION_WORKER_TEST
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (Uint64)t.tv_sec * 1000000000 + t.tv_nsec;
+#else
+    return now * 1000000;
+#endif
+}
+Uint64 SDL_GetTicks(void) { return SDL_GetTicksNS() / 1000000; }
+bool SDL_RumbleGamepadFrequenciesEx(SDL_Gamepad *pad,
+        float la, float lf, float lh, float lhf, float ra, float rf, float rh, float rhf, Uint32 ms) {
     assert(pad);
-    motor_low = low; motor_high = high; duration = ms; calls++;
-    return true;
+    pthread_mutex_lock(&lock);
+    if (check_stereo) assert(la == ra && lh == rh && lf == rf && lhf == rhf);
+    bands[0] = (VibrationValue){la, lf, lh, lhf};
+    bands[1] = (VibrationValue){ra, rf, rh, rhf};
+    motor_low = (Uint16)lroundf(fmaxf(la, ra) * 65535);
+    motor_high = (Uint16)lroundf(fmaxf(lh, rh) * 65535);
+    duration = ms;
+    if (calls < 4096) {
+        call_times[calls] = SDL_GetTicksNS();
+    }
+    calls++;
+    if (stall_output) {
+        output_entered = true;
+        while (stall_output) pthread_cond_wait(&test_output_gate, &lock);
+    }
+    bool ok = failures == 0;
+    if (failures) --failures;
+    pthread_mutex_unlock(&lock);
+    return ok;
 }
 const char *SDL_GetError(void) { return "test"; }
 
@@ -74,6 +112,11 @@ int main(void) {
     resp = (IpcResp){0}; hid(NULL, &req, &resp);
     vibration_update(pad, true);
     assert(motor_low == 49151 && motor_high == 58982);
+    assert(memcmp(bands, batch, sizeof bands) == 0);
+    before = calls;
+    batch[1].high_frequency = 410;  // frequency-only changes must reach the driver immediately
+    vibration_send(right, &batch[1]); vibration_update(pad, true);
+    assert(calls == before + 1 && bands[1].high_frequency == 410);
     // Bound iteration by the shorter buffer; an incomplete trailing value must not be read.
     batch[0].low_amplitude = .6f; req.x[1].size = sizeof(VibrationValue) + 1;
     hid(NULL, &req, &resp);
@@ -93,14 +136,26 @@ int main(void) {
     command(201, packet, sizeof packet);
     vibration_update(pad, true);
     assert(motor_low == 16384 && motor_high == 32768);
-
-    // Rumble strength scales the motor output proportionally.
-    g_settings.rumble_strength = 50;
+    // User strength changes reach SDL immediately without rewriting guest values.
+    before = calls;
+    g_settings.rumble_strength = RUMBLE_STRENGTH_DEFAULT;
     vibration_update(pad, true);
-    assert(motor_low == 8192 && motor_high == 16384);
-    g_settings.rumble_strength = 100;
+    assert(calls == before + 1 && bands[0].low_amplitude == .5f && bands[0].high_amplitude == 1);
+    assert(vibration_get(left).low_amplitude == .25f);
+    g_settings.rumble_strength = 0;
+    vibration_update(pad, true);
+    assert(motor_low == 0 && motor_high == 0 && duration == 0);
+    g_settings.rumble_strength = 20;
     vibration_update(pad, true);
     assert(motor_low == 16384 && motor_high == 32768);
+    // Same-sided bands share saturation, while the other side is independent.
+    float low = .25f, high = .125f;
+    rumble_apply_strength(&low, &high, 100);
+    assert(low == 1 && high == .5f);
+    low = .025f; high = 0;
+    rumble_apply_strength(&low, &high, 50);
+    assert(fabsf(low - .0625f) < 1e-6f && high == 0);
+    assert(rumble_strength_percent(-1) == 0 && rumble_strength_percent(101) == 100);
 
     uint8_t allow = 0; command(204, &allow, 1);
     vibration_update(pad, true); assert(motor_low == 0 && motor_high == 0);
@@ -112,6 +167,9 @@ int main(void) {
     value = (VibrationValue){NAN, 160, INFINITY, 320};
     vibration_send(left, &value); vibration_update(pad, true);
     assert(motor_low == 0 && motor_high == 0);
+    value = (VibrationValue){1, NAN, 1, 320};
+    vibration_send(left, &value); vibration_update(pad, true);
+    assert(bands[0].low_amplitude == 0 && bands[0].low_frequency == 160);
     value = (VibrationValue){-1, 160, 2, 320};
     vibration_send(left, &value); vibration_update(pad, true);
     assert(motor_low == 0 && motor_high == 65535);

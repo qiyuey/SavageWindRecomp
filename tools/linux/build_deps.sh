@@ -19,8 +19,6 @@ fetch() {  # url sha256 file
 }
 unpack() { rm -rf "$W/$2" && mkdir -p "$W/$2" && tar -xf "$S/$1" -C "$W/$2" --strip-components 1; }
 
-fetch https://github.com/libsdl-org/SDL/releases/download/release-3.4.16/SDL3-3.4.16.tar.gz \
-      7322236cd12090c3eb40b9728be4d49c76f66ad17d04369584d4ecad5cf77c68 SDL3-3.4.16.tar.gz
 fetch https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz \
       8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e ffmpeg-9.0.2.tar.xz
 fetch https://github.com/google/shaderc/archive/refs/tags/v2026.3.tar.gz \
@@ -70,13 +68,7 @@ if [ ! -f "$P/include/vma/vk_mem_alloc.h" ]; then
     mkdir -p "$P/include/vma" && cp "$W/vma/include/vk_mem_alloc.h" "$P/include/vma/"
 fi
 
-if [ ! -f "$P/lib/libSDL3.so" ]; then
-    unpack SDL3-3.4.16.tar.gz sdl
-    cmake -S "$W/sdl" -B "$W/sdl/build" -G Ninja "${CMAKE_CROSS[@]}" -DCMAKE_BUILD_TYPE=Release \
-        -DCMAKE_INSTALL_PREFIX="$P" -DCMAKE_INSTALL_LIBDIR=lib -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_TESTS=OFF \
-        -DSDL_EXAMPLES=OFF -DSDL_RPATH=OFF
-    cmake --build "$W/sdl/build" -j"$JOBS" && cmake --install "$W/sdl/build"
-fi
+SDL_INSTALL_PREFIX="$P" sh tools/build_ci_sdl.sh "$W/fork-sdl" "${CMAKE_CROSS[@]}" -DSDL_RPATH=OFF
 
 if [ ! -f "$P/lib/libavcodec.so" ]; then
     unpack ffmpeg-9.0.2.tar.xz ffmpeg

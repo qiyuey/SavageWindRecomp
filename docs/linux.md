@@ -126,19 +126,20 @@ code (~16 minutes on the Deck's 8 threads), precompiling the shaders (~7 minutes
 
 ## Building from source
 Ubuntu 25.04+ / Debian 13 packages (other distributions: the same libraries under their names; clang 18 or newer - the
-lifted FP/SIMD code needs `__builtin_elementwise_*` - and SDL3 3.2 or newer):
+lifted FP/SIMD code needs `__builtin_elementwise_*`):
 
-    sudo apt install clang lld make pkg-config python3-venv libsdl3-dev libavformat-dev libavcodec-dev \
+    sudo apt install clang lld make pkg-config python3-venv curl cmake ninja-build libusb-1.0-0-dev libavformat-dev libavcodec-dev \
         libavutil-dev libswscale-dev libvulkan-dev libshaderc-dev zlib1g-dev glslc vulkan-tools
 
-Ubuntu 24.04 LTS and older, Debian 12 and openSUSE Leap have no SDL3 package (SDL3 arrived after their freeze):
-build SDL3 from source there, or use the AppImage. Vulkan headers older than 1.4.321 (Debian 13, Ubuntu 25.04, Fedora
+For SDL desktop backends install your distribution's development packages for X11 or Wayland and audio
+(see `tools/linux/Containerfile` for the AppImage list). Switch 2 Pro USB frequency output uses the system
+libusb at runtime. Vulkan headers older than 1.4.321 (Debian 13, Ubuntu 25.04, Fedora
 42 ship 1.4.304 - 1.4.313) build too: feedback loops then use the `ATTACHMENT_FEEDBACK_LOOP_OPTIMAL` layout, as on
 drivers without `VK_KHR_unified_image_layouts`.
 
 `tools/linux/distro_build.sh` builds the app (start screen only, no game code) natively in each of Debian 13, Ubuntu
-26.04, Fedora 44, Arch and openSUSE Tumbleweed, in containers, with each distribution's own clang, SDL3, FFmpeg,
-shaderc and lld; CI runs the same script (`.github/workflows/linux-distros.yml`). That is the check for "does it build
+26.04, Fedora 44, Arch and openSUSE Tumbleweed, in containers, with the pinned SDL fork and each distribution's
+own clang, FFmpeg, shaderc and lld. CI runs the same script (`.github/workflows/linux-distros.yml`). That is the check for "does it build
 on my distribution": a container reproduces exactly what differs (package names, library sonames, header versions),
 where a virtual machine would only do it slower.
 
@@ -148,6 +149,9 @@ stb_image_write in `third_party/stb`.)
 Then from the repo root:
 
     python3 -m venv tools/venv && tools/venv/bin/pip install lz4 capstone unicorn
+    sh tools/build_ci_sdl.sh build/fork-sdl
+    export SDL3_ROOT="$PWD/build/fork-sdl/install"
+    export LD_LIBRARY_PATH="$SDL3_ROOT/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
     make -j         # the start screen only (no game code yet): set up the game files there, or put extracted/ here
     make gen        # once: recompile the game from your own game files
     make -j         # -> build/savagewind and the game code library build/swgame.so

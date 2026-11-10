@@ -33,9 +33,14 @@ jobs:
           msystem: UCRT64
           update: true
           install: >-
-            make mingw-w64-ucrt-x86_64-clang mingw-w64-ucrt-x86_64-lld mingw-w64-ucrt-x86_64-sdl3
+            make curl mingw-w64-ucrt-x86_64-clang mingw-w64-ucrt-x86_64-lld mingw-w64-ucrt-x86_64-libusb
+            mingw-w64-ucrt-x86_64-cmake mingw-w64-ucrt-x86_64-ninja
             mingw-w64-ucrt-x86_64-ffmpeg mingw-w64-ucrt-x86_64-vulkan-headers mingw-w64-ucrt-x86_64-vulkan-loader
             mingw-w64-ucrt-x86_64-shaderc
             mingw-w64-ucrt-x86_64-spirv-tools mingw-w64-ucrt-x86_64-pkgconf mingw-w64-ucrt-x86_64-nasm
+      - name: Build custom SDL3
+        run: sh tools/build_ci_sdl.sh build/ci-sdl
       - name: Build
-        run: make -j$(nproc) && ls -l build/savagewind.exe build/savagewind.dll.a
+        run: |
+          make -j$(nproc) SDL3_ROOT=build/ci-sdl/install SDL3_LIBDIR=build/ci-sdl/install/bin SDL3_LIB=build/ci-sdl/install/lib/libSDL3.dll.a
+          ls -l build/savagewind.exe build/savagewind.dll.a

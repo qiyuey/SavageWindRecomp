@@ -469,6 +469,8 @@ static void window_focus(bool focused) {
     mouse_dx_milli = mouse_dy_milli = cam_dx_milli = cam_dy_milli = 0;
     recompute_pad();  // release cached controls on loss; sample current controls on return
 }
+static void recover_gamepad(void);
+
 void input_focus_update(SDL_Window *w) {
     window_focus(w && (SDL_GetWindowFlags(w) & SDL_WINDOW_INPUT_FOCUS));
 }
@@ -476,8 +478,9 @@ bool input_window_focused(void) {
     return win_focused;
 }
 void input_mouse_update(SDL_Window *w) {
-    motion_poll();
     input_focus_update(w);
+    recover_gamepad();
+    motion_poll();
     static bool gyro_keys;  // (the gyro keys start or stop working without a key event: entering an apparatus)
     if (gyro_keys_live() != gyro_keys) {
         gyro_keys = !gyro_keys;
@@ -576,6 +579,7 @@ static void note_family(void) {
                              pad ? SDL_GetGamepadProduct(pad) : 0, pad ? (int)SDL_GetGamepadType(pad) : 0);
     pad_family = f;
 }
+
 int input_pad_family(void) {
     static int env = -2;
     if (env == -2) {
@@ -592,9 +596,17 @@ static SDL_Gamepad *pads[8];
 static int npads;
 static void pad_use(SDL_Gamepad *p) {
     if (p == pad) return;
-    if (pad) vibration_update(pad, false), motion_pad_closed();
+    if (pad) {
+        // Flush the old pad before the worker can start sending to its replacement.
+        vibration_update(pad, false);
+        vibration_detach(pad);
+        motion_pad_closed();
+    }
     pad = p;
-    if (pad) LOG("[input] gamepad in use: %s\n", SDL_GetGamepadName(pad)), motion_pad_opened(pad);
+    if (pad) {
+        LOG("[input] gamepad in use: %s\n", SDL_GetGamepadName(pad));
+        motion_pad_opened(pad);
+    }
     note_family();
     recompute_pad();
 }
@@ -603,11 +615,60 @@ static void pad_open(SDL_JoystickID id) {
         if (SDL_GetGamepadID(pads[i]) == id) return;
     if (npads == (int)(sizeof pads / sizeof *pads)) return;
     SDL_Gamepad *p = SDL_OpenGamepad(id);
-    if (!p) return;
+    if (!p) {
+        LOG("[input] gamepad open failed (id %u): %s\n", id, SDL_GetError());
+        return;
+    }
     pads[npads++] = p;
     if (!first_valve && SDL_GetGamepadVendor(p) == BIND_VALVE_VENDOR) first_valve = id;
     LOG("[input] gamepad: %s (%04x:%04x)\n", SDL_GetGamepadName(p), SDL_GetGamepadVendor(p), SDL_GetGamepadProduct(p));
     if (!pad) pad_use(p);
+}
+
+static void pad_remove(int index) {
+    SDL_Gamepad *gone = pads[index];
+    pads[index] = pads[--npads];
+    LOG("[input] gamepad disconnected (id %u)\n", SDL_GetGamepadID(gone));
+    if (gone == pad) pad_use(NULL);
+    SDL_CloseGamepad(gone);
+}
+
+static void select_connected_pad(void) {
+    if (pad) return;
+    for (int i = 0; i < npads; i++) {
+        if (SDL_GamepadConnected(pads[i])) {
+            pad_use(pads[i]);
+            break;
+        }
+    }
+}
+
+static void scan_gamepads(void) {
+    int count = 0;
+    SDL_JoystickID *ids = SDL_GetGamepads(&count);
+    for (int i = 0; i < count; i++) pad_open(ids[i]);
+    SDL_free(ids);
+}
+
+static void recover_gamepad(void) {
+    // The start screen can consume add/remove events before handing over the window.
+    static uint64_t next_scan;
+    uint64_t now = SDL_GetTicks();
+    if (host_test || now < next_scan) return;
+    next_scan = now + 500;
+    for (int i = npads; i-- > 0;) {
+        if (!SDL_GamepadConnected(pads[i])) pad_remove(i);
+    }
+    select_connected_pad();
+    scan_gamepads();
+}
+
+void input_shutdown(void) {
+    // The Vulkan exit path skips DLL teardown, so flush neutral before closing.
+    pad_use(NULL);
+    while (npads) SDL_CloseGamepad(pads[--npads]);
+    first_valve = 0;
+    vibration_shutdown();
 }
 
 void input_handle_event(const SDL_Event *e) {
@@ -632,10 +693,7 @@ void input_handle_event(const SDL_Event *e) {
     static bool scanned;  // pads present at startup: their ADDED event may have gone to the start screen's loop
     if (!scanned) {
         scanned = true;
-        int n = 0;
-        SDL_JoystickID *ids = SDL_GetGamepads(&n);
-        for (int i = 0; i < n; i++) pad_open(ids[i]);
-        SDL_free(ids);
+        scan_gamepads();
     }
     switch (e->type) {
     case SDL_EVENT_KEY_DOWN: case SDL_EVENT_KEY_UP:
@@ -717,13 +775,10 @@ void input_handle_event(const SDL_Event *e) {
     case SDL_EVENT_GAMEPAD_REMOVED:
         for (int i = 0; i < npads; i++) {
             if (SDL_GetGamepadID(pads[i]) != e->gdevice.which) continue;
-            SDL_Gamepad *gone = pads[i];
-            pads[i] = pads[--npads];
-            if (gone == pad) pad_use(npads ? pads[0] : NULL);  // (the one in use: another connected one, if any)
-            SDL_CloseGamepad(gone);
+            pad_remove(i);
             break;
         }
-        recompute_pad();
+        select_connected_pad();
         break;
     case SDL_EVENT_GAMEPAD_SENSOR_UPDATE:
         if (win_focused && pad && !host_test && SDL_GetGamepadID(pad) == e->gsensor.which) motion_sensor_event(e);

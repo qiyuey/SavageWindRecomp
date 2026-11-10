@@ -13,6 +13,7 @@ $bash = 'C:\msys64\usr\bin\bash.exe'
 & $bash -lc 'pacman -Syuu --noconfirm' | Out-Null
 & $bash -lc 'pacman -Syuu --noconfirm' | Out-Null  # second pass after a core update
 $pkgs = 'make', 'mingw-w64-ucrt-x86_64-clang', 'mingw-w64-ucrt-x86_64-lld', 'mingw-w64-ucrt-x86_64-sdl3',
+        'curl', 'mingw-w64-ucrt-x86_64-cmake', 'mingw-w64-ucrt-x86_64-ninja', 'mingw-w64-ucrt-x86_64-libusb',
         'mingw-w64-ucrt-x86_64-ffmpeg', 'mingw-w64-ucrt-x86_64-vulkan-headers', 'mingw-w64-ucrt-x86_64-vulkan-loader',
         'mingw-w64-ucrt-x86_64-shaderc',
         'mingw-w64-ucrt-x86_64-spirv-tools', 'mingw-w64-ucrt-x86_64-pkgconf', 'mingw-w64-ucrt-x86_64-gdb',

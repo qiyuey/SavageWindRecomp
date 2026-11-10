@@ -16,8 +16,20 @@ clone to LF line endings.
 From an MSYS2 UCRT64 shell, or Git Bash with MSYS2 first on PATH:
 
     export PATH="/c/msys64/ucrt64/bin:/c/msys64/usr/bin:$PATH"
+    sh tools/build_ci_sdl.sh build/fork-sdl
+    export SDL3_ROOT=build/fork-sdl/install
+    export SDL3_LIBDIR="$SDL3_ROOT/bin"
+    export SDL3_LIB="$SDL3_ROOT/lib/libSDL3.dll.a"
     make gen        # once: recompile the game from extracted/exefs (your own game files; see the start screen)
     make -j         # -> build/savagewind.exe and the game code library build/swgame.dll
+
+The SDL build helper needs curl and the UCRT64 packages for CMake, Ninja and libusb. It builds the
+pinned fork with frequency rumble. You can also use a sibling `SDL3` checkout at the same revision
+with a libusb-enabled x64 Release build in `build/windows-x64-release/Release`. In that case omit
+the SDL build helper and the three exports above. Make copies the selected SDL3 DLL next to the app.
+
+Windows builds default to `RELEASE=1`. The executable opens without a console and writes to
+`savagewind.log` when started from Explorer. Use `make -j RELEASE=0` for a console build.
 
 DLSS is optional and uses NVIDIA's SDK, not part of this repository: `git clone https://github.com/NVIDIA/DLSS` beside
 it, check out a release tag (tested: `v310.9.16`), and the default works as-is; otherwise pass its location
@@ -30,7 +42,9 @@ Without `generated/` only the app is built: the start screen builds the game cod
 files (as for players), given the generator and the compiler (`make gen-helper`, `tools/fetch_zig.sh`).
 `make runtime-objs` compiles the runtime only (quick check).
 
-Run from a shell that has `C:\msys64\ucrt64\bin` on PATH (SDL3, FFmpeg, Vulkan, shaderc DLLs).
+Run from a shell that has `C:\msys64\ucrt64\bin` on PATH (libusb, FFmpeg, Vulkan, shaderc DLLs).
+If you installed libusb separately, put its x64 DLL next to the app or on PATH. For `make dist`,
+pass its path as `SDL3_USB_DLL` if it is outside PATH.
 
 ## Package
     make deps-windows   # once: FFmpeg built as LGPL only (build/deps-win; downloads its source, needs nasm)
