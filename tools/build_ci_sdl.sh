@@ -5,7 +5,7 @@ set -eu
 work=$1
 shift
 jobs=${JOBS:-$(nproc)}
-revision=d6195f13a65a903a9c0b72f55b62e15e50031a82
+revision=cb98e17ffd7443a741c2c45b398df2f56ddb33b4
 
 mkdir -p "$work"
 work=$(cd "$work" && pwd)
