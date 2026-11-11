@@ -55,6 +55,7 @@ extern "C" {
 #include "romfs_build.h"
 #include "problem_report.h"
 #include "post_update.h"
+#include "steam_shortcuts.h"
 #include "settings.h"
 #include "color_grade.h"
 #include "pc_cursor.h"
@@ -104,7 +105,7 @@ static void save_png(id<MTLTexture> tex, const char *path) {
 #endif
 
 // The version this build is (also names the release files; Makefile / tools/bundle_macos.sh / make_dmg.sh read it).
-#define SAVAGEWIND_VERSION "0.5.0-alpha.5"
+#define SAVAGEWIND_VERSION "0.5.1-alpha.5"
 extern "C" const char *rt_version(void) { return SAVAGEWIND_VERSION; }  // (the title screen's version line: fs.c)
 
 // ------------------------------------------------------------------ game files
@@ -539,6 +540,19 @@ static std::string precompile_line(void) {
 static std::atomic<bool> g_stay_on_setup{false}, g_dlc_checking{false};
 
 // Linux: the update runs in this program (runtime/post_update.h). It comes back only if it failed.
+// Add to Steam (runtime/steam_shortcuts.h): waits for Steam to close, so on a thread of its own
+static std::atomic<bool> g_steam_busy{false};
+static void *steam_thread(void *) {
+    char why[700] = "";
+    bool ok = steam_add_savage_wind(why, sizeof why);
+    for (char *c = why; *c; c++)
+        if (*c == '%') *c = ' ';  // (shown as text: trv fills % in)
+    if (ok) set_job(tr("Added to Steam: Savage Wind (straight into the game) and Savage Wind Configuration."));
+    else set_job(tr("Couldn't add Savage Wind to Steam"), true, why);
+    g_steam_busy = false;
+    return NULL;
+}
+
 static void *update_thread(void *) {
     char title[200] = "", what[900] = "";
     update_apply_here(title, sizeof title, what, sizeof what);
@@ -1468,8 +1482,12 @@ extern "C" void launcher_run(const char *root, int mode) {
     Page page = status.empty() && !g_setup_only ? MAIN : SETUP;
     set_job("");  // (an earlier visit's result)
     // A new version, or game code that doesn't match this one: no button to find, it sets itself up. It doesn't start
-    // again by itself after failing: the page says why, and Set up game files retries.
-    bool auto_setup = post_update_shipped() && !getenv("SAVAGEWIND_LAUNCHER_SHOT") && check_copied_files(g_root).empty() &&
+    // again by itself after failing: the page says why, and Set up game files retries. Not with a test hook that sets up
+    // on its own (two builds at once in the same folder failed each other: a compiler's dependency file read half
+    // written).
+    bool test_setup =
+        getenv("SAVAGEWIND_LAUNCHER_EXTRACT") || getenv("SAVAGEWIND_SETUP_FROM") || getenv("SAVAGEWIND_LAUNCHER_SETUP");
+    bool auto_setup = post_update_shipped() && !getenv("SAVAGEWIND_LAUNCHER_SHOT") && !test_setup && check_copied_files(g_root).empty() &&
                       (post_update_pending(SAVAGEWIND_VERSION) || !status.empty()) && !post_update_failed_before(SAVAGEWIND_VERSION);
     if (!auto_setup) explain_status(status);
     bool play = false;
@@ -1949,6 +1967,14 @@ extern "C" void launcher_run(const char *root, int mode) {
 #ifndef __APPLE__
                     if (shader_precompile_available()) {
                         if (busy) opt_disable_next();
+                        {   // the background (ui/splash.mm), from the next start
+                            static const char *const pics[START_PICTURE_COUNT] = {"Savage Wind", "A screenshot", "Latest save"};
+                            if (opt_choice("Background", &g_settings.start_picture, pics, START_PICTURE_COUNT,
+                                           START_PICTURE_SCREENSHOT, "The picture behind this screen and while the game loads. A splash.jpg or splash.png of yours in the data folder always comes first."))
+                                settings_save();
+                            if (opt_toggle("Loading picture", &g_settings.boot_picture, true, "Shows that picture while the game loads. Turned off, the window stays black until the game's title screen: loading takes just as long."))
+                                settings_save();
+                        }
                         if (opt_toggle("Precompile all shaders", &g_settings.precompile_shaders, true,
                                        "After the setup, translates and compiles every shader of the game, so that none "
                                        "stutters the first time it is drawn, also in places never visited. A few more "
@@ -1988,6 +2014,17 @@ extern "C" void launcher_run(const char *root, int mode) {
                                        "Starting Savage Wind opens this screen, where updates are offered. Turned off, "
                                        "savagewind.exe goes straight into the game."))
                             settings_save();
+                    }
+                    if (steam_supported()) {
+                        bool sb = g_steam_busy;
+                        if (sb || busy) opt_disable_next();
+                        if (opt_action("Add to Steam", sb ? tr("Working...") : "", tr("Adds two entries to your Steam library: Savage Wind, which goes straight into the game, and Savage Wind Configuration. Steam closes for a moment and opens again. Do it again if you move this folder."), true)) {
+                            g_steam_busy = true;
+                            set_job(tr("Add to Steam") + std::string("..."));
+                            pthread_t st;
+                            pthread_create(&st, NULL, steam_thread, NULL);
+                            pthread_detach(st);
+                        }
                     }
                     bool setup_ready = ready && src.empty();
                     if (busy || setup_ready || (src.empty() && !check_copied_files(g_root).empty())) opt_disable_next();
