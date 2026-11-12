@@ -18,6 +18,7 @@
 internal SAVAGEWIND_REEXEC | | Counter for the automatic restart that finds free memory for the game.
 internal SAVAGEWIND_LAUNCH_FLAGS_APPLIED | | Remembers which launch options this run started with.
 internal SAVAGEWIND_DATA_ROOT | | Where Savage Wind keeps its files. It is read before launch options can be found.
+internal SAVAGEWIND_LAUNCHER_AUTOUPDATE | | Tests: the start screen starts an offered update at once.
 internal SAVAGEWIND_SETTINGS | | Another settings file. It is read before launch options can be found.
 internal SAVAGEWIND_X | | An example name in a code comment.
 
@@ -31,7 +32,6 @@ launcher SAVAGEWIND_SETUP_FROM | | Starts the game files setup by itself.
 launcher SAVAGEWIND_EXIT_AT | | Closes the game after a number of frames.
 launcher SAVAGEWIND_EXIT_AFTER_SHOT | | Closes the game after a screenshot.
 launcher SAVAGEWIND_LAUNCHER_AUTOPLAY | | Test hook of the start screen.
-launcher SAVAGEWIND_LAUNCHER_AUTOUPDATE | | Test hook of the start screen.
 launcher SAVAGEWIND_LAUNCHER_DELETE | | Test hook of the start screen.
 launcher SAVAGEWIND_LAUNCHER_EXTRACT | | Test hook of the start screen.
 launcher SAVAGEWIND_LAUNCHER_FONT | | Test hook of the start screen.
