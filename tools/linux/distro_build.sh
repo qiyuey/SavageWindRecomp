@@ -73,8 +73,13 @@ for image in $images; do
     cache=
     volume=swr-pkgcache-$(echo "$image" | tr -c 'a-zA-Z0-9_.\n-' _)
     [ "${PKG_CACHE:-1}" = 0 ] || cache="-v $volume:$(cache_dir_for "$image")"
+    # Podman may resolve the openSUSE short name to a different registry.
+    container_image=$image
+    case $image in
+        opensuse/tumbleweed:*) container_image=docker.io/$image ;;
+    esac
     if "$ENGINE" run --rm $PLATFORM -v "$REPO":/src:ro $cache -w /src \
-            -e SW_INSTALL="$install" -e JOBS="$JOBS" "$image" \
+            -e SW_INSTALL="$install" -e JOBS="$JOBS" "$container_image" \
             sh -ec 'eval "$SW_INSTALL"
                     sh tools/build_ci_sdl.sh /tmp/ci-sdl -DSDL_UNIX_CONSOLE_BUILD=ON -DSDL_X11=OFF -DSDL_WAYLAND=OFF
                     sdl=/tmp/ci-sdl/install
