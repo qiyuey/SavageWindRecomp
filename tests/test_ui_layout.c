@@ -18,6 +18,8 @@ uint64_t renderer_present_count(void) { return 1; }
 uint32_t kernel_current_thread_handle(void) { return 1; }
 uint64_t plat_now_ns(void) { return 1; }
 bool nvn_timeline(void) { return false; }
+NvnTexture *nvn_texture_host(uint64_t guest) { (void)guest; assert(!"unexpected texture lookup"); return NULL; }
+void nvn_sync_in_list(uint64_t guest) { (void)guest; assert(!"unexpected sync command"); }
 void rt_fatal_trace(void) { abort(); }
 void guest_call(Cpu *c, uint64_t address) { (void)c; (void)address; assert(!"unexpected guest callback"); }
 
