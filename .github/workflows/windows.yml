@@ -1,6 +1,5 @@
-# Builds the app on real Windows (MSYS2 UCRT64, the toolchain docs/BUILD-windows.md and tools/setup_windows.ps1 set up
-# on a player's machine): no game code, so no Nintendo data - the same `make` a Windows user runs from an MSYS2 UCRT64
-# shell. This is the check a Linux container cannot give: the Windows target's own headers, import libraries and
+# Compiles the runtime on real Windows without locally generated game code.
+# This is the check a Linux container cannot give: the Windows target's own headers, import libraries and
 # windres. Locally (a Linux host) the alternatives are a Windows VM under QEMU or a mingw-w64 cross build, neither of
 # which reproduces the MSYS2 setup.
 name: Windows
@@ -42,5 +41,4 @@ jobs:
         run: sh tools/build_ci_sdl.sh build/ci-sdl
       - name: Build
         run: |
-          make -j$(nproc) SDL3_ROOT=build/ci-sdl/install SDL3_LIBDIR=build/ci-sdl/install/bin SDL3_LIB=build/ci-sdl/install/lib/libSDL3.dll.a
-          ls -l build/savagewind.exe build/savagewind.dll.a
+          make -j$(nproc) runtime-objs build/savagewind-config.exe SDL3_ROOT=build/ci-sdl/install SDL3_LIBDIR=build/ci-sdl/install/bin SDL3_LIB=build/ci-sdl/install/lib/libSDL3.dll.a

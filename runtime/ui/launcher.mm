@@ -421,19 +421,26 @@ static std::atomic<unsigned long long> g_done, g_total;
 static std::atomic<float> g_build_frac{-1};  // -1: not building
 static bool g_copy_skipped;                  // (only the game code to build: the bar is all of that)
 static void setup_progress(uint64_t done, uint64_t) { g_done = done; }
+#ifndef _WIN32
 static void build_progress(double f, const char *step) {
     g_build_frac = (float)f;
     static const char *last;
     if (step != last) last = step, set_job(step);
 }
+#endif
 static float extract_progress(void) {
     unsigned long long t = g_total, d = g_done;
+#ifdef _WIN32
+    float f = t ? (float)((double)d / (double)t) : 0;
+#else
     float b = g_build_frac, f = b >= 0 ? (g_copy_skipped ? b : 0.1f + 0.9f * b) : t ? 0.1f * (float)((double)d / (double)t) : 0;
+#endif
     return f < 0 ? 0 : f > 0.99f ? 0.99f : f;
 }
 
 // Why the game code didn't build, from what the builder and the compiler said (runtime/gamebuild.c): what the player
 // can do about it, with the reason itself under it for a bug report.
+#ifndef _WIN32
 static bool said(const std::string &low, std::initializer_list<const char *> words) {
     for (const char *w : words)
         if (low.find(w) != std::string::npos) return true;
@@ -487,6 +494,7 @@ static bool build_game_code(void) {
     }
     return ok;
 }
+#endif
 
 // ------------------------------------------------------------------ shader precompilation (runtime/nvn/precompile.h)
 // After a setup when its option is on (the setup page's PRECOMPILE ALL SHADERS, settings.precompile_shaders), or on
@@ -785,9 +793,11 @@ static void *extract_thread(void *) {
             std::string found = v ? check_romfs(g_root + "/romfs", *v) : "";
             if (!found.empty()) { set_romfs_failure(*v, found); goto done; }
         }
+#ifndef _WIN32
         if (!new_version || !gamelib_present(g_root.c_str())) {  // (the same game code as the last version: nothing to build)
             if (!room_for_build() || !build_game_code()) goto done;
         } else fprintf(stderr, "[launcher] update: the game code is already right for this version\n");
+#endif
         goto check;
     }
     set_job("Looking for the game files...");
@@ -846,7 +856,9 @@ static void *extract_thread(void *) {
                 set_job("Setting up the downloadable content...");
                 if (!setup_dlc(dlc)) { set_failure(FAIL_COPY); goto done; }
             }
+#ifndef _WIN32
             if (!build_game_code()) goto done;
+#endif
             goto check;
         }
         rt_remove_game_files(g_root.c_str());  // (an earlier or interrupted setup's; removes the folder too)
@@ -863,7 +875,9 @@ static void *extract_thread(void *) {
             set_job("Setting up the downloadable content...");
             if (!setup_dlc(dlc)) { set_failure(FAIL_COPY); goto done; }
         }
+#ifndef _WIN32
         if (!build_game_code()) goto done;
+#endif
     }
 check:
     {
@@ -1516,7 +1530,9 @@ extern "C" void launcher_run(const char *root, int mode) {
         pthread_create(&t, NULL, extract_thread, NULL);
         pthread_detach(t);
     }
+#ifndef _WIN32
     if (g_settings.check_updates && !getenv("SAVAGEWIND_NO_UPDATE_CHECK")) update_check_start();
+#endif
     // SAVAGEWIND_LAUNCHER_SHOT=<frame>[:<page>] (test): save build/launcher.png at that frame and exit; page: settings[:<tab>] / askdelete / setup
     long shot_at = getenv("SAVAGEWIND_LAUNCHER_SHOT") ? atol(getenv("SAVAGEWIND_LAUNCHER_SHOT")) : 0, frame = 0;
     if (shot_at) {

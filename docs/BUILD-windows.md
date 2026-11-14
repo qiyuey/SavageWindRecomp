@@ -1,7 +1,6 @@
 # Building Savage Wind on Windows (x86-64)
 
-Status: part of main. Builds and runs the game on Vulkan (with your own game files); `make dist` packages the
-release zip.
+The personal fork builds a local Vulkan executable from your own game files.
 
 ## One-time setup
 Run in PowerShell from the repo root:
@@ -13,9 +12,8 @@ Allocator, validation layers), Python 3.12 for the tools (`tools\venv`: unicorn,
 clone to LF line endings.
 
 ## Build
-The personal fork's Windows build uses `-O2` and the Ryzen 9 7950X (Zen 4) target for the runtime and game library.
-It builds a single game library with no legacy CPU fallback. Changing the game compiler flags rebuilds
-the generated objects in place.
+The Windows build statically links the generated game code into `savagewind.exe`. Both the runtime and game code
+use `-O2 -march=znver4 -flto=thin` by default.
 
 From an MSYS2 UCRT64 shell, or Git Bash with MSYS2 first on PATH:
 
@@ -24,67 +22,32 @@ From an MSYS2 UCRT64 shell, or Git Bash with MSYS2 first on PATH:
     export SDL3_ROOT=build/fork-sdl/install
     export SDL3_LIBDIR="$SDL3_ROOT/bin"
     export SDL3_LIB="$SDL3_ROOT/lib/libSDL3.dll.a"
-    make gen        # once: recompile the game from extracted/exefs (your own game files; see the start screen)
-    make -j         # -> build/savagewind.exe and the game code library build/swgame.dll
+    make gen        # recompile from your own game files in extracted/exefs
+    make -j8        # build/savagewind.exe and build/savagewind-config.exe
 
-The runtime uses ThinLTO by default. It also uses PGO when `build/local-runtime.profdata` exists.
+The runtime also uses PGO when `build/local-runtime.profdata` exists.
 To use another profile, pass `PGO=use PGO_PROFILE=<path-to-merged-profdata>`.
 
 The SDL build helper needs curl and the UCRT64 packages for CMake, Ninja and libusb. It builds the
 pinned fork with frequency rumble. You can also use a sibling `SDL3` checkout at the same revision
 with a libusb-enabled x64 Release build in `build/windows-x64-release/Release`. In that case omit
-the SDL build helper and the three exports above. Make copies the selected SDL3 DLL next to the app.
+the SDL build helper and the three exports above. Make copies the selected SDL3 DLL if the build directory needs one.
 
 Windows builds default to `RELEASE=1`. The executable opens without a console and writes to
 `savagewind.log` when started from Explorer. Use `make -j RELEASE=0` for a console build.
 
-DLSS is optional and uses NVIDIA's SDK, not part of this repository: `git clone https://github.com/NVIDIA/DLSS` beside
-it, check out a release tag (tested: `v310.9.16`), and the default works as-is; otherwise pass its location
-explicitly: `make DLSS_SDK=/path/to/DLSS -j`. The runtime DLL is not copied into the source tree. `make dist` includes
-`nvngx_dlss.dll` and the SDK license when the SDK path contains the Windows x86_64 redistributable. Keep the DLL and
-the SDK at the same version - the tag the headers and `nvsdk_ngx_s.lib` come from - rather than a newer or older
-`nvngx_dlss.dll` from elsewhere.
+Run `make gen` again after updating the generator or changing the game files. The configuration screen manages
+game assets and settings. Use `make runtime-objs` to compile the runtime without generated game code.
 
-Without `generated/` only the app is built: the start screen builds the game code itself when you set up the game
-files (as for players), given the generator and the compiler (`make gen-helper`, `tools/fetch_zig.sh`).
-`make runtime-objs` compiles the runtime only (quick check).
+The Windows executable contains locally recompiled game code. Keep it in `build/` alongside the external runtime
+DLLs, extracted game files, saves and settings. Obtain updates by rebuilding the fork locally.
 
-Run from a shell that has `C:\msys64\ucrt64\bin` on PATH (libusb, FFmpeg, Vulkan, shaderc DLLs).
-If you installed libusb separately, put its x64 DLL next to the app or on PATH. For `make dist`,
-pass its path as `SDL3_USB_DLL` if it is outside PATH.
+Keep the two DLC RomFS directories at `build/extracted/aoc1/` and `build/extracted/aoc2/` when
+running from `build/`. The executable uses the base game's recompiled code to mount both DLC
+directories at runtime. See [DLC layout](game-files.md#the-dlc).
 
-## Package
-    make deps-windows   # once: FFmpeg built as LGPL only (build/deps-win; downloads its source, needs nasm)
-    make gen-helper     # the game code generator without Python (build/helper/swgen)
-    tools/fetch_zig.sh  # the compiler the start screen builds the game code with (build/zig)
-    make dist           # -> build/dist/SavageWind-<version>-windows.zip (no game code inside)
-
-`make gen-helper` freezes the generator with a python.org CPython (`py -3.12` by default; another one with
-`GEN_PY="py -3.14"`, as long as unicorn and capstone have wheels for it). `make dist` also makes the slim compiler
-(`tools/zig_slim.sh`: only the headers the game code includes, and zig's runtime built ahead of time), so the
-start screen's build doesn't compile zig's own libraries on the player's machine. The version is
-`SAVAGEWIND_VERSION` in `runtime/ui/launcher.mm`. Before a release, test the zip as a player would: extract it to a
-new folder, run it with a PATH without MSYS2, set up the game files from the start screen and play.
-
-The zip's `Savage Wind/` folder holds `savagewind.exe` (icon from `docs/icon/icon.ico`, via windres),
-`Savage Wind Configuration.exe` (`build/savagewind-config.exe`, runtime/platform/windows_config.c: starts
-`savagewind.exe --config`, the configuration screen; same icon), the Fira Sans font files, `swgen/`, `zig/` and the
-MSYS2 DLLs. A plain start of `savagewind.exe` shows only the game files setup until they're ready, then goes
-straight into the game; `--config` shows the configuration screen (Play, Settings, game files, Quit). Never in the
-zip: a start screen picture (`splash.jpg` / `splash.png` is the player's own, read from the data folder; `make dist`
-checks). No installer: game files, saves and settings are kept next to the exe, so
-the folder must be writable (the app says so and quits if it isn't, e.g. under Program Files). A source checkout
-with `extracted/` in the starting folder keeps using that folder instead.
-
-`SW Update.exe` (`runtime/platform/windows_update.c`) installs a newer release over the folder from Savage Wind
-Configuration. It replaces only the files named in the zip's `sw-manifest.txt`, which `make dist` writes, so game files,
-saves, settings and anything else a player keeps there are never touched. A release is only offered if a signature is
-next to its zip. After `make dist`, sign the zip and upload the `.sig` with it:
-
-    tools/sign_update.py build/dist/SavageWind-<version>-windows.zip <private key .pem>
-
-Sign the AppImages the same way, or Linux players won't be offered the release. The private key is never in this repository; its public half is `runtime/platform/sw_update_key.h`. `make test-update-core`
-and `make test-sw-update` cover the updater: the second one goes through every failure it knows against a local server.
+To enable the local Git check for ignored game content and staged blobs over 50 MiB, run
+`git config core.hooksPath .githooks` once in this checkout.
 
 ## Differences from macOS
 - Guest window 0x70_0000_0000..0x73_2000_0000 is reserved with VirtualAlloc and committed per region

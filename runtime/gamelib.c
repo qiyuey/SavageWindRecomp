@@ -5,9 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#ifdef _WIN32
-#include <windows.h>
-#else
+#ifndef _WIN32
 #include <dlfcn.h>
 #endif
 
@@ -108,6 +106,33 @@ static bool take_sites(const GameLibTables *t) {
 }
 
 // The library's id file (<library>.id, written next to it by the build): its GAMELIB_ID, read without loading it.
+#ifdef _WIN32
+extern const GameLibTables *swgame_tables(void);
+
+bool gamelib_other_cpu(const char *game_dir) {
+    (void)game_dir;
+    return false;
+}
+
+bool gamelib_present(const char *game_dir) {
+    (void)game_dir;
+    return true;
+}
+
+bool gamelib_load(const char *game_dir, char *why, size_t why_size) {
+    (void)game_dir;
+    if (g_tables) return true;
+    const GameLibTables *t = swgame_tables();
+    if (!take_sites(t)) {
+        if (why) snprintf(why, why_size, "%s", g_error);
+        return false;
+    }
+    g_tables = t;
+    LOG("[gamelib] linked into savagewind.exe (game version %s, %u sites)\n", g_game_version, *t->nsites);
+    LOG("[gamelib] target: %s\n", GAMELIB_ARCH);
+    return true;
+}
+#else
 static bool read_id(const char *lib, char id[128]) {
     char path[1100];
     snprintf(path, sizeof path, "%s.id", lib);
@@ -164,15 +189,9 @@ bool gamelib_present(const char *game_dir) {
 }
 
 static const GameLibTables *open_lib(const char *path) {
-#ifdef _WIN32
-    HMODULE h = LoadLibraryA(path);
-    if (!h) { snprintf(g_error, sizeof g_error, "can't load %s (error %lu)", path, GetLastError()); return NULL; }
-    GameLibEntry entry = (GameLibEntry)(void *)GetProcAddress(h, GAMELIB_ENTRY);
-#else
     void *h = dlopen(path, RTLD_NOW | RTLD_LOCAL);
     if (!h) { snprintf(g_error, sizeof g_error, "%s", dlerror()); return NULL; }
     GameLibEntry entry = (GameLibEntry)dlsym(h, GAMELIB_ENTRY);
-#endif
     if (!entry) { snprintf(g_error, sizeof g_error, "%s: not game code", path); return NULL; }
     const GameLibTables *t = entry();
     if (!t || t->abi != GAMELIB_ABI || !t->id || strcmp(t->id, gamelib_id())) {
@@ -219,6 +238,7 @@ bool gamelib_load(const char *game_dir, char *why, size_t why_size) {
     if (!g_tables && why) snprintf(why, why_size, "%s", g_error);
     return g_tables != NULL;
 }
+#endif
 
 const GameLibTables *gamelib_tables(void) { return g_tables; }
 

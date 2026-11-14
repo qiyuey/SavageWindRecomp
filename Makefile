@@ -30,6 +30,8 @@ endif
 # B: build dir. MACOS_MIN: oldest macOS to run on (default: this one). DEPS: prefix with SDL3 / FFmpeg instead of
 # Homebrew's (make deps). `make app` sets all three (build/mac15, 15.0, build/deps); plain `make` uses none.
 B         ?= build
+LTO       ?= $(if $(filter windows,$(PLATFORM)),thin)
+THINLTO   := $(if $(filter thin,$(LTO)),-flto=thin)
 MACOS_MIN ?=
 DEPS      ?=
 MINFLAG  := $(if $(MACOS_MIN),-mmacosx-version-min=$(MACOS_MIN))
@@ -151,11 +153,8 @@ BACKEND_OBJ += $(B)/rt/platform/windows_rc.o  # the .exe's icon (Explorer, taskb
 WINDRES  ?= windres
 IMGUI_OBJ += $(B)/imgui/imgui_impl_vulkan.o
 UIFLAGS  := -x c++ $(OSFLAGS)  # the .mm UI sources are plain C++ apart from __APPLE__ blocks
-GAMELIB  := $(B)/swgame.dll
-# the runtime functions it calls: exported by the .exe, linked through its import library
-LDFLAGS  += -Wl,--export-all-symbols -Wl,--out-implib,$(B)/savagewind.dll.a
-GAMELIB_LDFLAGS := -shared -fuse-ld=lld $(B)/savagewind.dll.a
-GAMELIB_SHARED := -shared  # (+ the import library: runtime/gamebuild.c)
+RT_SRC := $(filter-out runtime/gamebuild.c,$(RT_SRC))
+STATIC_GAME_RSP := $(B)/static-game.rsp
 # "Savage Wind Configuration.exe" in the release: starts savagewind.exe --config (runtime/platform/windows_config.c)
 CONFIG_EXE := $(B)/savagewind-config.exe
 endif
@@ -168,7 +167,8 @@ GAMELIB_SRCS := tools/gen.py tools/lifter.py tools/analyze.py tools/nso.py tools
 GAMELIB_SRCS += tools/layout.py tools/game_sites.py
 GAMELIB_ID := $(shell (cat $(GAMELIB_SRCS); echo '$(strip $(GENFLAGS))'; echo '$(GENFLAGS_ZIG)'; echo 'gen $(GENLOCALS)') | (shasum -a 256 2>/dev/null || sha256sum) | cut -c1-16)
 GAME_CONFIG := $(B)/game_config
-$(shell mkdir -p $(B) && [ -f $(GAME_CONFIG) ] && [ "$$(cat $(GAME_CONFIG) 2>/dev/null)" = '$(strip $(GENFLAGS))' ] || echo '$(strip $(GENFLAGS))' > $(GAME_CONFIG))
+GAME_BUILD_FLAGS := $(strip $(GENFLAGS) $(if $(STATIC_GAME_RSP),$(THINLTO)))
+$(shell mkdir -p $(B) && [ -f $(GAME_CONFIG) ] && [ "$$(cat $(GAME_CONFIG) 2>/dev/null)" = '$(GAME_BUILD_FLAGS)' ] || echo '$(GAME_BUILD_FLAGS)' > $(GAME_CONFIG))
 # The compatible target (#9): x86-64 CPUs without AVX2 / FMA / BMI2 get the game code built with GENARCH_COMPAT in
 # place of GENARCH (no -mfma: simd.h's fma is runtime/simd_softfma.h, slower). The start screen builds the one the CPU
 # runs (runtime/gamelib.h gamelib_compat); its id differs, so neither library is ever loaded in place of the other.
@@ -212,7 +212,7 @@ RT_OBJ   := $(patsubst runtime/%.c,$(B)/rt/%.o,$(RT_SRC))
 RTFLAGS  := -O2 -g -fno-strict-aliasing -Wall -Wno-unused-function -Iruntime -Iruntime/nvn -isystem third_party -isystem third_party/stb $(DEPINC) $(OSFLAGS)
 CXXFLAGS := -O2 -g -std=c++17 -I$(IMGUI) -I$(IMGUI)/backends -Iruntime -Iruntime/nvn -isystem third_party -Ithird_party/stb $(DEPINC)
 
-# Optional runtime-only optimization. The generated game library keeps GENFLAGS and its build ID.
+# Optional profile-guided optimization for the runtime.
 # Use a separate B for each mode; the stamp also rebuilds runtime objects when flags or profiles change.
 # Profile-guided build of the runtime (not the game library). tools/pgo/runtime.profdata is a ready profile, so
 #   make PGO=use B=build-pgo            optimized build, no training needed
@@ -223,7 +223,6 @@ CXXFLAGS := -O2 -g -std=c++17 -I$(IMGUI) -I$(IMGUI)/backends -Iruntime -Iruntime
 #   llvm-profdata merge -o tools/pgo/runtime.profdata <dir>/*.profraw
 LOCAL_PGO_PROFILE := $(if $(filter windows,$(PLATFORM)),$(wildcard $(B)/local-runtime.profdata))
 PGO ?= $(if $(LOCAL_PGO_PROFILE),use)
-LTO ?= $(if $(filter windows,$(PLATFORM)),thin)
 PGO_PROFILE ?= $(or $(LOCAL_PGO_PROFILE),tools/pgo/runtime.profdata)
 ifneq ($(filter-out gen use,$(PGO)),)
 $(error PGO must be empty, gen, or use)
@@ -231,8 +230,9 @@ endif
 ifneq ($(filter-out thin,$(LTO)),)
 $(error LTO must be empty or thin)
 endif
-RUNTIME_OPTFLAGS := $(RUNTIME_ARCH) $(if $(LTO),-flto=thin)
-RUNTIME_LINKFLAGS := $(if $(LTO),-flto=thin)
+HOST_OPTFLAGS := $(strip $(RUNTIME_ARCH) $(THINLTO))
+RUNTIME_OPTFLAGS := $(HOST_OPTFLAGS)
+RUNTIME_LINKFLAGS := $(THINLTO)
 ifeq ($(PGO),gen)
 RUNTIME_OPTFLAGS += -fprofile-instr-generate -fprofile-update=atomic -mllvm -enable-value-profiling=false -DSW_PGO_GENERATE=1
 RUNTIME_LINKFLAGS += -fprofile-instr-generate
@@ -273,16 +273,16 @@ $(B)/ffx/%.o: $(FFX)/sdk/src/%.cpp $(FFX)/ffx_compat.h
 $(B)/rt/nvn/vulkan/framegen.o: CXXFLAGS := -include $(FFX)/ffx_compat.h $(FFX_INC) -I$(FFX)/spirv $(CXXFLAGS)
 $(B)/rt/nvn/vulkan/framegen.o: $(FFX)/spirv/ffx_shaders_vk.h $(FFX)/spirv/ffx_fsr3upscaler_vk.h $(FFX)/ffx_compat.h
 
-all: $(EXE) $(CONFIG_EXE) $(if $(strip $(GEN_SRC)),$(GAMELIB))  # (GEN_SRC is a space when there is no generated/)
+all: $(EXE) $(CONFIG_EXE) $(if $(strip $(GEN_SRC)),$(GAMELIB))
 
 $(B)/obj/%.o: $(GEN)/%.c runtime/cpu.h runtime/simd.h runtime/simd_fp.h runtime/simd_softfma.h $(GAME_CONFIG)
 	@mkdir -p $(dir $@)
-	@$(CC) $(GENFLAGS) -c $< -o $@
+	@$(CC) $(GAME_BUILD_FLAGS) -c $< -o $@
 $(B)/obj/layout.o: runtime/gamelib.h
 
 $(B)/obj/tools/gamelib_entry.o: tools/gamelib_entry.c $(GAMELIB_SRCS) Makefile $(GAME_CONFIG)
 	@mkdir -p $(dir $@)
-	$(CC) $(GENFLAGS) -DGAMELIB_ID='"$(GAMELIB_ID)"' -c $< -o $@
+	$(CC) $(GAME_BUILD_FLAGS) -DGAMELIB_ID='"$(GAMELIB_ID)"' -c $< -o $@
 $(B)/rt/nvn/maxwell/translate.o $(B)/rt/nvn/vulkan/spirv.o: $(SHADER_IDS)
 $(B)/rt/nvn/maxwell/translate.o $(B)/rt/nvn/vulkan/spirv.o: RTFLAGS += -include $(SHADER_IDS)
 $(B)/rt/main.o: $(B)/source_id
@@ -326,16 +326,20 @@ $(B)/rt/%.o: runtime/%.m $(RT_HDRS)
 # linked to a temp file, then renamed over: a copy of the game still running keeps its (old) file - relinking in
 # place gets running copies killed by macOS (code signature of the changed pages). The temp file keeps the real name
 # (in a folder of its own): on Windows the import library records the name the game code library loads it by.
-$(EXE): $(RT_OBJ) $(BACKEND_OBJ) $(UI_OBJ) $(IMGUI_OBJ) $(if $(wildcard $(DLSS_DLL)),$(DLSS_IMPORT) $(DLSS_LIB)) $(WIN_SUBSYSTEM_STAMP)
+$(EXE): $(RT_OBJ) $(BACKEND_OBJ) $(UI_OBJ) $(IMGUI_OBJ) $(if $(wildcard $(DLSS_DLL)),$(DLSS_IMPORT) $(DLSS_LIB)) $(WIN_SUBSYSTEM_STAMP) $(STATIC_GAME_RSP)
 	@mkdir -p $(dir $@)link
-	$(CXX) -o $(dir $@)link/$(notdir $@) $(filter-out $(WIN_SUBSYSTEM_STAMP),$^) $(LDFLAGS)
+	$(CXX) -o $(dir $@)link/$(notdir $@) $(filter-out $(WIN_SUBSYSTEM_STAMP) $(STATIC_GAME_RSP),$^) $(addprefix -Wl$(comma)@,$(STATIC_GAME_RSP)) $(LDFLAGS)
 	mv -f $(dir $@)link/$(notdir $@) $@
 
 ifeq ($(PLATFORM),windows)
 $(EXE): | $(B)/SDL3.dll
-$(B)/SDL3.dll: $(SDL3_DLL)
+$(B)/SDL3.dll:
 	@mkdir -p $(dir $@)
-	cp "$<" "$@"
+	cp "$(SDL3_DLL)" "$@"
+
+$(STATIC_GAME_RSP): $(GEN_OBJ) Makefile
+	@test -f "$(GEN)/layout.c" || { echo "Run make gen with your extracted game files before building."; exit 1; }
+	$(file >$@,$(GEN_OBJ))
 endif
 
 # its id file (<library>.id) says what it was built from without loading it (runtime/gamelib.c)
@@ -344,6 +348,7 @@ endif
 # expanded linker command exceeds the shell's argument limit, so feed the
 # current object list through a response file. Old objects from a previous
 # generator layout must not be linked after chunks are renamed or removed.
+ifneq ($(PLATFORM),windows)
 $(B)/swgame.rsp: $(GEN_OBJ) Makefile
 	$(file >$@,$(GEN_OBJ))
 
@@ -351,6 +356,7 @@ $(GAMELIB): $(GEN_OBJ) $(B)/swgame.rsp | $(EXE)
 	$(CC) $(GAMELIB_LDFLAGS) -o $@.tmp @$(B)/swgame.rsp
 	mv -f $@.tmp $@
 	echo $(GAMELIB_ID) > $@.id
+endif
 
 $(B)/rt/ui/i18n.o: $(wildcard runtime/ui/i18n/*.inc) runtime/ui/i18n.h
 $(B)/rt/ui/%.o: runtime/ui/%.mm $(RT_HDRS)
@@ -390,11 +396,11 @@ $(B)/rt/platform/windows_rc.o: runtime/platform/windows.rc runtime/platform/wind
 	@mkdir -p $(dir $@)
 	$(WINDRES) -I docs/icon -I runtime/platform -O coff $< -o $@
 
-$(B)/rt/platform/windows_config.o: runtime/platform/windows_config.c
+$(B)/rt/platform/windows_config.o: runtime/platform/windows_config.c $(B)/runtime_config Makefile
 	@mkdir -p $(dir $@)
-	$(CC) -O2 -Wall $(OSFLAGS) -c $< -o $@
+	$(CC) -O2 -Wall $(OSFLAGS) $(HOST_OPTFLAGS) -c $< -o $@
 $(B)/savagewind-config.exe: $(B)/rt/platform/windows_config.o $(B)/rt/platform/windows_rc.o
-	$(CC) -o $@ $^ -fuse-ld=lld -Wl,--subsystem,windows
+	$(CC) -o $@ $^ $(THINLTO) -fuse-ld=lld -Wl,--subsystem,windows
 
 # "SW Update.exe" in the release (runtime/platform/windows_update.c): static, it replaces every DLL next to it
 SW_UPDATE_LIBS := -static -fuse-ld=lld -municode -Wl,--subsystem,windows -lwinhttp -lbcrypt -lcomctl32 -lshell32 -luser32 -lgdi32
@@ -442,50 +448,8 @@ WIN_B    := build/win-release
 deps-windows:
 	tools/build_deps_windows.sh
 dist:
-	@[ -f build/deps-win/lib/libavcodec.dll.a ] || { echo "make deps-windows first (LGPL FFmpeg)"; exit 1; }
-	@[ -d build/helper/swgen ] || { echo "make gen-helper first (the game code generator)"; exit 1; }
-	@! find tools -maxdepth 1 -name '*.py' -newer build/helper/swgen/swgen.exe | grep -q . || \
-	    { echo "make gen-helper first: tools/*.py changed since build/helper/swgen was frozen"; exit 1; }
-	@[ -x build/zig/zig.exe ] || { echo "tools/fetch_zig.sh first (the compiler)"; exit 1; }
-	@[ -f "$(SDL3_USB_DLL)" ] || { echo "Set SDL3_USB_DLL to the x64 libusb-1.0.dll path"; exit 1; }
-	$(MAKE) B=$(WIN_B) DEPS=$(CURDIR)/build/deps-win RELEASE=1 $(WIN_B)/savagewind.exe $(WIN_B)/savagewind-config.exe $(WIN_B)/sw-update.exe
-	! nm $(WIN_B)/savagewind.exe | grep ' f_70' >/dev/null  # (no game code inside)
-	rm -rf build/dist && mkdir -p "$(DIST)/gamelib-src"
-	cp $(WIN_B)/savagewind.exe $(WIN_B)/savagewind.dll.a "$(DIST)/"
-	cp "$(WIN_B)/SDL3.dll" "$(SDL3_USB_DLL)" "$(DIST)/"
-	cp $(WIN_B)/savagewind-config.exe "$(DIST)/Savage Wind Configuration.exe"
-	cp $(WIN_B)/sw-update.exe "$(DIST)/SW Update.exe"
-	tools/zig_slim.sh $(strip $(filter-out -Iruntime,$(GENFLAGS))) \
-	    $(if $(GENFLAGS_COMPAT),-- $(strip $(filter-out -Iruntime,$(GENFLAGS_COMPAT))))  # (zig, its runtime built ahead of time)
-	cp -R build/helper/swgen "$(DIST)/"
-	cp -R build/zig-slim "$(DIST)/zig"
-	cp runtime/cpu.h runtime/simd.h runtime/simd_fp.h runtime/simd_softfma.h runtime/gamelib.h tools/gamelib_entry.c \
-	    runtime/hle/hle_symbols.txt "$(DIST)/gamelib-src/"
-	cp docs/icon/icon_1024.png "$(DIST)/icon.png"
-	cp runtime/nvn/vulkan/vk_pipelines.seed "$(DIST)/"  # (the pipeline seed the precompilation reads: hashes and render state, nothing of the game)
-	cp third_party/fonts/FiraSans/FiraSans-SemiBold.ttf third_party/fonts/FiraSans/FiraSans-Medium.ttf "$(DIST)/"  # (menus, OFL)
-	cp third_party/fonts/FiraSans/OFL.txt "$(DIST)/FiraSans-OFL.txt"
-	cp third_party/fonts/NotoSansThai/NotoSansThai-Medium.ttf "$(DIST)/"  # (Thai menus, OFL)
-	cp third_party/fonts/NotoSansThai/OFL.txt "$(DIST)/NotoSansThai-OFL.txt"
-	cp third_party/fonts/NotoSansHebrew/NotoSansHebrew-Medium.ttf "$(DIST)/"  # (Hebrew menus, OFL)
-	cp third_party/fonts/NotoSansHebrew/OFL.txt "$(DIST)/NotoSansHebrew-OFL.txt"
-	cp third_party/FidelityFX/LICENSE.txt "$(DIST)/FidelityFX-LICENSE.txt"  # (AMD FidelityFX SDK, MIT: README "License")
-	if [ -f build/fsr-dlls/amd_fidelityfx_loader_vk.dll ]; then cp build/fsr-dlls/amd_fidelityfx_*_vk.dll \
-	    build/fsr-dlls/AMD-FidelityFX-DLL-LICENSE.txt "$(DIST)/"; fi  # (AMD FSR 4: tools/fetch_fsr_dlls.py; AMD's licence allows binary redistribution with this notice)
-	mkdir "$(DIST)/colour-luts" && cp third_party/luts/*.cube third_party/luts/README.md "$(DIST)/colour-luts/"  # (CC0: Video > Colour)
-	cp README.md LICENSE "$(DIST)/"  # (licenses and source links of the bundled components: README "License")
-	if [ -f "$(DLSS_SDK)/lib/Windows_x86_64/rel/nvngx_dlss.dll" ]; then \
-		cp "$(DLSS_SDK)/lib/Windows_x86_64/rel/nvngx_dlss.dll" "$(DIST)/"; \
-		cp "$(DLSS_SDK)/LICENSE.txt" "$(DIST)/NVIDIA-DLSS-LICENSE.txt"; \
-	fi
-	PATH="$(CURDIR)/build/deps-win/bin:$$PATH" ldd $(WIN_B)/savagewind.exe | awk '(/ucrt64/ || /deps-win/) && !/vulkan-1|SDL3\.dll/ {print $$3}' | sort -u | \
-	    xargs -I{} cp -u {} "$(DIST)/"
-	! ls "$(DIST)" | grep -iE 'x264|x265|xvid|postproc'  # (no GPL codec libraries in the release)
-	! ls "$(DIST)" | grep -i splash  # (no start screen picture: the player's own, never shipped)
-	python3 tools/make_update_manifest.py "$(DIST)" "$(VERSION)"  # (what SW Update checks and replaces: this list, nothing else)
-	cd build/dist && if command -v zip >/dev/null; then zip -qr "SavageWind-$(VERSION)-windows.zip" "Savage Wind"; \
-	    else /c/Windows/System32/tar.exe -a -cf "SavageWind-$(VERSION)-windows.zip" "Savage Wind"; fi
-	@echo "build/dist/SavageWind-$(VERSION)-windows.zip"
+	@echo 'Windows builds contain locally recompiled game code. Use make for the local build.'
+	@exit 1
 
 # The game code generator as a standalone helper, so players need no Python: build/helper/swgen/ (swgen[.exe] +
 # _internal/), frozen by PyInstaller from tools/swgen.spec in its own venv (build/gen-venv). Shipped as swgen/ next to
