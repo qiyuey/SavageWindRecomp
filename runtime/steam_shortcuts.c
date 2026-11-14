@@ -384,7 +384,8 @@ static void unsetenv_running(void) {
 bool steam_supported(void) {
 #ifdef _WIN32
     char p[1100];
-    return rt_resource("sw-manifest.txt", NULL, p, sizeof p);
+    return rt_resource("sw-manifest.txt", NULL, p, sizeof p) ||
+           rt_resource("savagewind-config.exe", NULL, p, sizeof p);
 #else
     return appimage_path() != NULL;
 #endif
@@ -404,7 +405,10 @@ static int our_entries(SteamEntry *e, char bufs[][1200]) {
     if (!s) return 0;
     *s = 0;
     snprintf(bufs[0], 1200, "\"%s\"", exe);
-    snprintf(bufs[1], 1200, "\"%s\\Savage Wind Configuration.exe\"", dir);
+    char manifest[1100];
+    bool packaged = rt_resource("sw-manifest.txt", NULL, manifest, sizeof manifest);
+    snprintf(bufs[1], 1200, "\"%s\\%s\"", dir,
+             packaged ? "Savage Wind Configuration.exe" : "savagewind-config.exe");
     snprintf(bufs[2], 1200, "\"%s\\\"", dir);
     snprintf(bufs[3], 1200, "%s", exe);
     e[0] = (SteamEntry){"Savage Wind", bufs[0], bufs[2], bufs[3], "--game"};

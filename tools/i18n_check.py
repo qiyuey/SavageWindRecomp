@@ -125,6 +125,20 @@ def keys():
     return found
 
 
+def launch_option_keys():
+    # Launch option descriptions reach tr() through the generated flag table.
+    found = {}
+    path = os.path.join('tools', 'launch_flags_curated.txt')
+    with open(os.path.join(ROOT, path), encoding='utf-8') as source:
+        for ln, line in enumerate(source, 1):
+            if line.lstrip().startswith('#'):
+                continue
+            fields = line.split('|', 2)
+            if len(fields) == 3 and fields[2].strip():
+                found.setdefault(fields[2].strip(), f'{path}:{ln}')
+    return found
+
+
 def table(lang):
     path = os.path.join(ROOT, 'runtime/ui/i18n', lang + '.inc')
     if not os.path.exists(path):
@@ -150,29 +164,34 @@ def c_quote(s):
 
 def main():
     want = keys()
+    launch_options = launch_option_keys()
+    known = {**want, **launch_options}
     args = sys.argv[1:]
     if args[:1] == ['--missing']:
         have = table(args[1])
-        for k, where in want.items():
+        for k, where in known.items():
             if k not in have:
                 print(f'T({c_quote(k)}, "")  // {where}')
         return
     langs = args or sorted(os.path.splitext(os.path.basename(p))[0] for p in glob.glob(os.path.join(ROOT, 'runtime/ui/i18n/*.inc')))
-    print(f'{len(want)} menu texts')
+    print(f'{len(known)} menu texts')
     bad = False
     for lang in langs:
         have = table(lang)
-        missing = [k for k in want if k not in have]
-        unused = [k for k in have if k not in want]
-        english = [k for k in want if have.get(k) == '' and is_sentence(k)]
+        # Launch option translations are required for Simplified Chinese. Other
+        # locales can translate them incrementally and fall back to English.
+        required = known if lang == 'zh-Hans' else want
+        missing = [k for k in required if k not in have or (k in launch_options and not have[k])]
+        unused = [k for k in have if k not in known]
+        english = [k for k in required if have.get(k) == '' and is_sentence(k)]
         print(f'{lang}: {len(have)} entries, {len(missing)} missing, {len(unused)} unused, '
               f'{len(english)} left in English')
         for k in missing[:20]:
-            print(f'  missing: {k[:90]!r}  ({want[k]})')
+            print(f'  missing: {k[:90]!r}  ({known[k]})')
         for k in unused[:20]:
             print(f'  unused:  {k[:90]!r}')
         for k in english[:20]:
-            print(f'  english: {k[:90]!r}  ({want[k]})')
+            print(f'  english: {k[:90]!r}  ({known[k]})')
         bad |= bool(missing)
     sys.exit(1 if bad else 0)
 

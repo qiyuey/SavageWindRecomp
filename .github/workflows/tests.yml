@@ -41,6 +41,7 @@ jobs:
               - 'runtime/language.c'
               - 'runtime/hle/bindings.c'
               - 'tools/i18n_check.py'
+              - 'tools/launch_flags_curated.txt'
               - '.github/workflows/tests.yml'
             layout:
               - 'tools/*.py'

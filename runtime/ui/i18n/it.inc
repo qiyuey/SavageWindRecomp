@@ -154,6 +154,8 @@ T("Off: the 3D image renders at the window's resolution. AMD FSR 1: it renders s
 T("AMD FSR 3 and NVIDIA DLSS (NVIDIA RTX graphics cards) are coming in a later version.", "AMD FSR 3 e NVIDIA DLSS (schede grafiche NVIDIA RTX) arriveranno in una versione successiva.")
 T("How the game's image (1920 x 1080) is scaled up to a bigger window. Off: plain (bilinear) scaling. MetalFX: Apple's upscaler, sharper.\n\nRendering below the window's size (the modes below) is coming in a later version.", "Come l'immagine del gioco (1920 x 1080) viene ingrandita per una finestra più grande. No: scalatura semplice (bilineare). MetalFX: l'upscaler di Apple, più definito.\n\nIl rendering sotto la dimensione della finestra (le modalità qui sotto) arriverà in una versione successiva.")
 T("Ultra Quality", "Qualità ultra")
+T("Native AA", "Antialiasing nativo")
+T("Native AA applies FSR 4 anti-aliasing at the selected render resolution without upscaling.", "Applica l’antialiasing di FSR 4 alla risoluzione di rendering scelta senza upscaling.")
 T("Quality", "Qualità")
 T("Balanced", "Bilanciata")
 T("Performance", "Prestazioni")

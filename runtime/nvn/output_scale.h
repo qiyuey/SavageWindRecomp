@@ -33,6 +33,10 @@ bool rt_dlss(void);      // Video > Upscaler DLSS, and NGX can run it
 bool rt_temporal(void);  // TAA, FSR 3 / 4 or DLSS: motion vectors and the jitter on (vulkan/mvec.c, rt_jitter_on)
 void rt_jitter_set_phases(uint32_t n);  // (FSR 3: the jitter sequence's length, fsr3_jitter_phases)
 bool upscale_modes_available(void);  // (rendering below the window's size: needs render-target scaling)
+int upscale_quality_in_use(void);
+// Video menus put the FSR 4 Native AA choice first while retaining the stored quality IDs.
+int upscale_quality_for_choice(int upscaler, int choice);
+int upscale_quality_choice(int upscaler, int quality);
 double upscale_mode_factor(int q);
 double upscale_factor(void);
 bool upscale_mode_offered(int q);   // mode q can be chosen now (Ultra Performance with FSR 3 / 4 or DLSS: a 4K window)

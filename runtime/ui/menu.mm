@@ -634,7 +634,7 @@ extern "C" void renderer_get_scene_scale(float *sx, float *sy);
 extern "C" bool renderer_gpu_rtx(void);  // (vulkan/device.c, metal.m)
 extern "C" volatile int g_fg_active;     // (hle/framepace.c: the last presented frame was generated)
 // Video > Upscaler mode's names, by UPQ_*
-static const char *const k_upscale_modes[UPQ_COUNT] = {"Ultra Quality", "Quality", "Balanced", "Performance", "Ultra Performance"};
+static const char *const k_upscale_modes[UPQ_COUNT] = {"Ultra Quality", "Quality", "Balanced", "Performance", "Ultra Performance", "Native AA"};
 extern "C" {
 #include "../nvn/output_scale.h"
 }
@@ -959,13 +959,16 @@ static void tab_display(void) {
         // its mode (AMD's scale factors), one step in; greyed when the upscaler is off
         const char *const *modes = k_upscale_modes;
         bool modes_ok = upscale_modes_available();
+        int mode_count = g_settings.upscaler == UPSCALE_FSR4 ? UPQ_COUNT : UPQ_NATIVE_AA;
         std::string mode_names[UPQ_COUNT];
         const char *mn[UPQ_COUNT];
         bool mavail[UPQ_COUNT];
-        for (int i = 0; i < UPQ_COUNT; i++) {
-            mode_names[i] = modes_ok ? tr(modes[i]) : std::string(tr(modes[i])) + " " + tr("(coming soon)");
+        for (int i = 0; i < mode_count; i++) {
+            int quality = upscale_quality_for_choice(g_settings.upscaler, i);
+            const char *label = modes[quality];
+            mode_names[i] = modes_ok ? tr(label) : std::string(tr(label)) + " " + tr("(coming soon)");
             mn[i] = mode_names[i].c_str();
-            mavail[i] = modes_ok && upscale_mode_offered(i);
+            mavail[i] = modes_ok && upscale_mode_offered(quality);
         }
         float sx, sy;  // the 3D scene's size (BOTW docked: 1600 x 900 times its scale)
         renderer_get_scene_scale(&sx, &sy);
@@ -975,11 +978,15 @@ static void tab_display(void) {
                                         "on each side: Ultra Quality 1.3x, Quality 1.5x, Balanced 1.7x, Performance "
                                         "2x, Ultra Performance 3x. Smaller is faster and softer.")) +
                          "\n\n" + (modes_ok ? rendering : tr("Coming in a later version."));
+        if (g_settings.upscaler == UPSCALE_FSR4)
+            md += std::string("\n\n") + tr("Native AA applies FSR 4 anti-aliasing at the selected render resolution without upscaling.");
         opt_indent(1);
         if (g_settings.upscaler == UPSCALE_OFF) opt_disable_next();
         static int mshown = -1;
-        opt_choice_avail("Upscaler mode", &g_settings.upscale_quality, &mshown, mn, mavail, UPQ_COUNT, UPQ_QUALITY,
-                         md.c_str());
+        int choice = upscale_quality_choice(g_settings.upscaler, upscale_quality_in_use());
+        int def = upscale_quality_choice(g_settings.upscaler, UPQ_QUALITY);
+        if (opt_choice_avail("Upscaler mode", &choice, &mshown, mn, mavail, mode_count, def, md.c_str()))
+            g_settings.upscale_quality = upscale_quality_for_choice(g_settings.upscaler, choice);
         opt_indent(-1);
     }
 #ifdef __APPLE__

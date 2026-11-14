@@ -22,6 +22,21 @@ static void near(double actual, double expected) {
 
 int main(void) {
     OutScale o;
+    assert(upscale_quality_for_choice(UPSCALE_FSR4, 0) == UPQ_NATIVE_AA);
+    assert(upscale_quality_for_choice(UPSCALE_FSR4, 1) == UPQ_ULTRA);
+    for (int choice = 0; choice < UPQ_COUNT; choice++) {
+        int quality = upscale_quality_for_choice(UPSCALE_FSR4, choice);
+        assert(upscale_quality_choice(UPSCALE_FSR4, quality) == choice);
+    }
+    assert(upscale_quality_for_choice(UPSCALE_FSR3, 0) == UPQ_ULTRA);
+    assert(upscale_quality_choice(UPSCALE_FSR3, UPQ_NATIVE_AA) == UPQ_QUALITY);
+    g_settings.upscale_quality = UPQ_NATIVE_AA;
+    g_settings.upscaler = UPSCALE_FSR4;
+    near(upscale_mode_factor(upscale_quality_in_use()), 1.0);
+    g_settings.upscaler = UPSCALE_FSR1;
+    near(upscale_mode_factor(upscale_quality_in_use()), 1.5);
+    g_settings.upscaler = UPSCALE_OFF;
+    g_settings.upscale_quality = UPQ_QUALITY;
     output_scale(1280, 800, true, &o);
     near(o.shape, .9);
     near(o.vw, 1280); near(o.vh, 800);
