@@ -205,6 +205,8 @@ bool gamelib_load(const char *game_dir, char *why, size_t why_size) {
                 LOG("[gamelib] target: %s\n", gamelib_compat() ? "compatible (" GAMELIB_ARCH_COMPAT
                                                                   ", no FMA instructions: slower)"
                                                                 : GAMELIB_ARCH);
+#else
+                if (*GAMELIB_ARCH) LOG("[gamelib] target: %s\n", GAMELIB_ARCH);
 #endif
                 for (uint32_t k = 0; k < *g_tables->nmodules; k++) {
                     const GameLibModule *m = &g_tables->modules[k];

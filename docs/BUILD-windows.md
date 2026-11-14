@@ -13,6 +13,10 @@ Allocator, validation layers), Python 3.12 for the tools (`tools\venv`: unicorn,
 clone to LF line endings.
 
 ## Build
+The personal fork's Windows build uses `-O2` and the Ryzen 9 7950X (Zen 4) target for the runtime and game library.
+It builds a single game library with no legacy CPU fallback. Changing the game compiler flags rebuilds
+the generated objects in place.
+
 From an MSYS2 UCRT64 shell, or Git Bash with MSYS2 first on PATH:
 
     export PATH="/c/msys64/ucrt64/bin:/c/msys64/usr/bin:$PATH"
@@ -22,6 +26,9 @@ From an MSYS2 UCRT64 shell, or Git Bash with MSYS2 first on PATH:
     export SDL3_LIB="$SDL3_ROOT/lib/libSDL3.dll.a"
     make gen        # once: recompile the game from extracted/exefs (your own game files; see the start screen)
     make -j         # -> build/savagewind.exe and the game code library build/swgame.dll
+
+The runtime uses ThinLTO by default. It also uses PGO when `build/local-runtime.profdata` exists.
+To use another profile, pass `PGO=use PGO_PROFILE=<path-to-merged-profdata>`.
 
 The SDL build helper needs curl and the UCRT64 packages for CMake, Ninja and libusb. It builds the
 pinned fork with frequency rumble. You can also use a sibling `SDL3` checkout at the same revision

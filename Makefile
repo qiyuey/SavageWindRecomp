@@ -36,7 +36,8 @@ MINFLAG  := $(if $(MACOS_MIN),-mmacosx-version-min=$(MACOS_MIN))
 CC       := clang $(MINFLAG) $(CROSS)
 CXX      := clang++ $(MINFLAG) $(CROSS)
 IMGUI    := third_party/imgui
-GENFLAGS := -O1 -fno-strict-aliasing -Wno-return-type -Wno-unused-label -fvisibility=hidden -Iruntime
+GAME_OPT ?= $(if $(filter windows,$(PLATFORM)),-O2,-O1)
+GENFLAGS := $(GAME_OPT) -fno-strict-aliasing -Wno-return-type -Wno-unused-label -fvisibility=hidden -Iruntime
 # RECOMP_LOCALS=1 (the default since Alpha 5): the generator keeps each function's most used registers and its flags in
 # C locals (gen.py --locals, docs/RECOMP-LOCALS.md); RECOMP_LOCALS=0 builds the plain game code. It is part of
 # GAMELIB_ID, so a library built one way is never loaded for the other.
@@ -44,7 +45,7 @@ RECOMP_LOCALS ?= 1
 GENLOCALS := $(if $(filter 1,$(RECOMP_LOCALS)),--locals)
 # The start screen's zig cc reads -O1 as its own "fast" mode (clang -O2 with the loop and SLP vectorizers) and adds
 # debug info and frame pointers: these give it what clang -O1 builds here, in a third less time (runtime/gamebuild.c)
-GENFLAGS_ZIG := -Xclang $(filter -O%,$(GENFLAGS)) -fno-vectorize -fno-slp-vectorize -g0 -fomit-frame-pointer
+GENFLAGS_ZIG := -Xclang $(GAME_OPT) $(if $(filter -O1,$(GAME_OPT)),-fno-vectorize -fno-slp-vectorize) -g0 -fomit-frame-pointer
 
 # The game code (made by `make gen` from your own game files) is its own library next to the app (runtime/gamelib.h);
 # the app itself holds none of it. $(GEN)/layout.c, then a folder per module (main, subsdk*, sdk)
@@ -119,8 +120,10 @@ WIN_SUBSYSTEM_STAMP := $(B)/windows_subsystem
 $(shell mkdir -p $(B) && [ "$$(cat $(WIN_SUBSYSTEM_STAMP) 2>/dev/null)" = '$(WIN_SUBSYSTEM)' ] || echo '$(WIN_SUBSYSTEM)' > $(WIN_SUBSYSTEM_STAMP))
 DEPINC   := -I$(SDL3_ROOT)/include $(if $(DEPS),-I$(DEPS)/include)
 OSFLAGS  := -D_FILE_OFFSET_BITS=64 -D_POSIX_THREAD_SAFE_FUNCTIONS -D_CRT_RAND_S -DWIN32_LEAN_AND_MEAN -DNOMINMAX
-GENARCH  ?= -march=x86-64-v3  # AVX2 + FMA for the lifted FP/SIMD code (simd.h)
-GENARCH_COMPAT ?= -march=x86-64-v2  # CPUs without them (GAMELIB_ID_COMPAT below)
+# This fork's Windows build targets the local Ryzen 9 7950X (Zen 4).
+GENARCH  ?= -march=znver4
+GENARCH_COMPAT :=
+RUNTIME_ARCH ?= $(GENARCH)
 GENFLAGS += -D_FILE_OFFSET_BITS=64 $(GENARCH)
 # --stack: every thread's default stack, reserved (committed as it grows): 256 MB, the guest threads' recursion runs on
 # it (runtime/kernel.c thread_start)
@@ -164,15 +167,18 @@ GAMELIB_SRCS := tools/gen.py tools/lifter.py tools/analyze.py tools/nso.py tools
                 runtime/cpu.h runtime/simd.h runtime/simd_fp.h runtime/simd_softfma.h runtime/gamelib.h
 GAMELIB_SRCS += tools/layout.py tools/game_sites.py
 GAMELIB_ID := $(shell (cat $(GAMELIB_SRCS); echo '$(strip $(GENFLAGS))'; echo '$(GENFLAGS_ZIG)'; echo 'gen $(GENLOCALS)') | (shasum -a 256 2>/dev/null || sha256sum) | cut -c1-16)
+GAME_CONFIG := $(B)/game_config
+$(shell mkdir -p $(B) && [ -f $(GAME_CONFIG) ] && [ "$$(cat $(GAME_CONFIG) 2>/dev/null)" = '$(strip $(GENFLAGS))' ] || echo '$(strip $(GENFLAGS))' > $(GAME_CONFIG))
 # The compatible target (#9): x86-64 CPUs without AVX2 / FMA / BMI2 get the game code built with GENARCH_COMPAT in
 # place of GENARCH (no -mfma: simd.h's fma is runtime/simd_softfma.h, slower). The start screen builds the one the CPU
 # runs (runtime/gamelib.h gamelib_compat); its id differs, so neither library is ever loaded in place of the other.
 # `make` builds the GENARCH one.
 ifneq ($(strip $(GENARCH)),)
+GAMELIB_TARGETS := -DGAMELIB_ARCH='"$(strip $(GENARCH))"'
 ifneq ($(strip $(GENARCH_COMPAT)),)
 GENFLAGS_COMPAT := $(subst $(strip $(GENARCH)),$(strip $(GENARCH_COMPAT)),$(GENFLAGS))
 GAMELIB_ID_COMPAT := $(shell (cat $(GAMELIB_SRCS); echo '$(strip $(GENFLAGS_COMPAT))'; echo '$(GENFLAGS_ZIG)'; echo 'gen $(GENLOCALS)') | (shasum -a 256 2>/dev/null || sha256sum) | cut -c1-16)
-GAMELIB_TARGETS := -DGAMELIB_ARCH='"$(strip $(GENARCH))"' -DGAMELIB_ARCH_COMPAT='"$(strip $(GENARCH_COMPAT))"' \
+GAMELIB_TARGETS += -DGAMELIB_ARCH_COMPAT='"$(strip $(GENARCH_COMPAT))"' \
                    -DGAMELIB_ID_COMPAT='"$(GAMELIB_ID_COMPAT)"'
 endif
 endif
@@ -215,16 +221,17 @@ CXXFLAGS := -O2 -g -std=c++17 -I$(IMGUI) -I$(IMGUI)/backends -Iruntime -Iruntime
 #   make PGO=gen B=build-gen            instrumented savagewind.exe
 #   run it (a scripted walk ending with SAVAGEWIND_EXIT_AT=<frame>, or by hand) with LLVM_PROFILE_FILE=<dir>/rt-%p.profraw
 #   llvm-profdata merge -o tools/pgo/runtime.profdata <dir>/*.profraw
-PGO ?=
-LTO ?=
-PGO_PROFILE ?= tools/pgo/runtime.profdata
+LOCAL_PGO_PROFILE := $(if $(filter windows,$(PLATFORM)),$(wildcard $(B)/local-runtime.profdata))
+PGO ?= $(if $(LOCAL_PGO_PROFILE),use)
+LTO ?= $(if $(filter windows,$(PLATFORM)),thin)
+PGO_PROFILE ?= $(or $(LOCAL_PGO_PROFILE),tools/pgo/runtime.profdata)
 ifneq ($(filter-out gen use,$(PGO)),)
 $(error PGO must be empty, gen, or use)
 endif
 ifneq ($(filter-out thin,$(LTO)),)
 $(error LTO must be empty or thin)
 endif
-RUNTIME_OPTFLAGS := $(if $(LTO),-flto=thin)
+RUNTIME_OPTFLAGS := $(RUNTIME_ARCH) $(if $(LTO),-flto=thin)
 RUNTIME_LINKFLAGS := $(if $(LTO),-flto=thin)
 ifeq ($(PGO),gen)
 RUNTIME_OPTFLAGS += -fprofile-instr-generate -fprofile-update=atomic -mllvm -enable-value-profiling=false -DSW_PGO_GENERATE=1
@@ -268,22 +275,22 @@ $(B)/rt/nvn/vulkan/framegen.o: $(FFX)/spirv/ffx_shaders_vk.h $(FFX)/spirv/ffx_fs
 
 all: $(EXE) $(CONFIG_EXE) $(if $(strip $(GEN_SRC)),$(GAMELIB))  # (GEN_SRC is a space when there is no generated/)
 
-$(B)/obj/%.o: $(GEN)/%.c runtime/cpu.h runtime/simd.h runtime/simd_fp.h runtime/simd_softfma.h  # (cpu.h includes them)
+$(B)/obj/%.o: $(GEN)/%.c runtime/cpu.h runtime/simd.h runtime/simd_fp.h runtime/simd_softfma.h $(GAME_CONFIG)
 	@mkdir -p $(dir $@)
 	@$(CC) $(GENFLAGS) -c $< -o $@
 $(B)/obj/layout.o: runtime/gamelib.h
 
-$(B)/obj/tools/gamelib_entry.o: tools/gamelib_entry.c $(GAMELIB_SRCS) Makefile  # (the id: the flags are in here too)
+$(B)/obj/tools/gamelib_entry.o: tools/gamelib_entry.c $(GAMELIB_SRCS) Makefile $(GAME_CONFIG)
 	@mkdir -p $(dir $@)
 	$(CC) $(GENFLAGS) -DGAMELIB_ID='"$(GAMELIB_ID)"' -c $< -o $@
 $(B)/rt/nvn/maxwell/translate.o $(B)/rt/nvn/vulkan/spirv.o: $(SHADER_IDS)
 $(B)/rt/nvn/maxwell/translate.o $(B)/rt/nvn/vulkan/spirv.o: RTFLAGS += -include $(SHADER_IDS)
 $(B)/rt/main.o: $(B)/source_id
 $(B)/rt/main.o: RTFLAGS += -DSW_SOURCE='"$(SW_SOURCE)"'
-$(B)/rt/gamelib.o: $(GAMELIB_SRCS) Makefile
+$(B)/rt/gamelib.o: $(GAMELIB_SRCS) Makefile $(GAME_CONFIG)
 $(B)/rt/gamelib.o: RTFLAGS += -DGAMELIB_ID='"$(GAMELIB_ID)"' $(GAMELIB_TARGETS)
 # the start screen's build of it (runtime/gamebuild.c) uses the same flags
-$(B)/rt/gamebuild.o: $(GAMELIB_SRCS) Makefile
+$(B)/rt/gamebuild.o: $(GAMELIB_SRCS) Makefile $(GAME_CONFIG)
 $(B)/rt/gamebuild.o: RTFLAGS += -DGAMELIB_CFLAGS='"$(strip $(filter-out -Iruntime,$(GENFLAGS)))"' \
                                 $(if $(GENFLAGS_COMPAT),-DGAMELIB_CFLAGS_COMPAT='"$(strip $(filter-out -Iruntime,$(GENFLAGS_COMPAT)))"') \
                                 -DGAMELIB_ZIGFLAGS='"$(GENFLAGS_ZIG)"' -DGAMELIB_SHARED='"$(GAMELIB_SHARED)"' -DGAMELIB_GENARGS='"$(GENLOCALS)"'
@@ -429,7 +436,7 @@ dmg: app
 # (RELEASE=1: the log goes to savagewind.log next to the exe, fatal errors show a message box). Its DLLs are looked up
 # with build/deps-win/bin first (the FFmpeg DLL names are the same as MSYS2's GPL ones). vulkan-1.dll is left
 # out: every Vulkan driver installs the loader in System32. Saves and game files go next to the exe at run time.
-# Needs: Windows 10+ x64, a Vulkan 1.3 driver, an SSE4.2 CPU (GENARCH_COMPAT x86-64-v2; checked at startup).
+# Needs: Windows 10+ x64, a Vulkan 1.3 driver, and a CPU that supports this build's GENARCH.
 DIST     := build/dist/Savage Wind
 WIN_B    := build/win-release
 deps-windows:
