@@ -53,6 +53,8 @@ static uint64_t stat_uub, stat_uub_same, stat_gcopy_hit, stat_gcopy_miss, stat_g
 static uint64_t stat_ubo_direct, stat_chain_barriers;  // constant buffers bound in place (ubo_direct)
 static void ubo_check_done(bool report);
 static void vdyn_check(uint64_t seq);
+static void race_probe_check(uint64_t seq);
+static void race_probe_submit(uint64_t seq);
 static void vdyn_reset(void);
 static void ubo_check_submit(uint64_t seq);
 static uint64_t stat_feedback_live;  // depth attachments sampled as they are (read-only feedback, no copy)
@@ -462,6 +464,7 @@ static void gpp_mark(VkCommandBuffer cb, const char *label) {
 static void gp_mark(VkCommandBuffer cb, const char *fmt, ...) {
     bool legacy = g_gpuprof_frame && gp_n < GP_MAX - 1;
     if (!legacy && !prof_enabled()) return;
+    if (rec_on_recorder()) return;  // (FSR 3's passes when the recorder dispatches it, fsr3_run: a mark is queued commands)
     char buf[160];
     va_list ap;
     va_start(ap, fmt);
@@ -669,6 +672,7 @@ void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra
         SW_ACC("submit");
         dl_note("submit %llu", (unsigned long long)submit_seq + 1);
         ubo_check_submit(submit_seq + 1);
+        race_probe_submit(submit_seq + 1);
         rec_QueueSubmit2(&si, submit_seq + 1);  // (the recorder: in order with the commands)
         PROF_ADD(prof_submit);
     }
@@ -805,6 +809,24 @@ static bool oneshot_queries(void) {
     return on;
 }
 
+// (GPU overlap) A fence the game is told is done before the GPU is: its submission is at least in the driver's hands.
+// The overlap counts on the GPU working on that frame while the game writes its next frame's data, double-buffered, into
+// the memory the frame before it used. Since Alpha 5 plain presents are made by the recorder thread (device.c
+// present_on_recorder): an external frame limiter (RivaTuner, Radeon Chill) that sleeps inside vkQueuePresentKHR held
+// the recorder there, and the frame the game was told was done had not even been submitted when the game wrote into
+// what it reads. Rain and torch particles (vertex data both the CPU and storing shaders write, read in place, which
+// vdyn can't copy) came out stretched across the screen for a frame (#620, #629, #683, #717, #776; reproduced with
+// SAVAGEWIND_DEBUG_PRESENT_LIMIT=60 on an RTX 3060, and gone with the recorder off or presents on a thread of their own).
+// Measured with SAVAGEWIND_VK_RACE_PROBE=1 in Lanayru's heavy rain: ~20% of that vertex data was written by the CPU
+// between its translation and its submission with the limiter, ~0% without. Waiting here for the submission costs
+// nothing without such a limiter (the recorder is done with it by then), and with one, the game waits in its own frame
+// fence, as it did with presents on the translating thread. SAVAGEWIND_VK_OVERLAP_HANDOVER=0: not waited for.
+static void deferred_handed_over(uint64_t seq) {
+    static int on = -1;
+    if (on < 0) on = !getenv("SAVAGEWIND_VK_OVERLAP_HANDOVER") || atoi(getenv("SAVAGEWIND_VK_OVERLAP_HANDOVER"));
+    if (on && rec_on() && seq > rec_submitted()) rec_wait_submitted(seq);
+}
+
 void renderer_wait_seq(uint64_t seq) {
     if (!seq) return;
     pthread_mutex_lock(&seq_lock);
@@ -820,6 +842,7 @@ void renderer_wait_seq(uint64_t seq) {
         uint64_t prev = deferred_seq, need = full ? seq : oneshot_seq > prev ? oneshot_seq : prev;
         deferred_seq = need >= seq ? 0 : seq;
         pthread_mutex_unlock(&seq_lock);
+        if (need < seq) deferred_handed_over(seq);
         static int nlog;
         if (nlog < 20) {
             nlog++;
@@ -828,12 +851,14 @@ void renderer_wait_seq(uint64_t seq) {
         }
         vk_wait_seq(need);
         vdyn_check(need);
+        race_probe_check(need);
         return;
     }
     if (gpu_overlap()) {
         if (vk_completed_seq() >= seq) {
             if (seq >= deferred_seq) deferred_seq = 0;  // (in order: the older one is done too)
             pthread_mutex_unlock(&seq_lock);
+            race_probe_check(seq);
             readbacks_apply();
             return;
         }
@@ -841,6 +866,7 @@ void renderer_wait_seq(uint64_t seq) {
         if (seq > prev) {  // a newer fence: the deferred one is waited for now, this one at the next call
             deferred_seq = seq;
             pthread_mutex_unlock(&seq_lock);
+            deferred_handed_over(seq);
             if (!prev) return;
             seq = prev;
         } else {  // the deferred fence again, or an older one: a real wait on it
@@ -849,11 +875,13 @@ void renderer_wait_seq(uint64_t seq) {
         }
         vk_wait_seq(seq);
         vdyn_check(seq);
+        race_probe_check(seq);
         return;
     }
     pthread_mutex_unlock(&seq_lock);
     vk_wait_seq(seq);
     vdyn_check(seq);
+    race_probe_check(seq);
 }
 
 // A call per set costs the driver a lock, a free-list walk and a handle write (~0.25 ms a frame at ~3000 new sets). Sets
@@ -1036,7 +1064,8 @@ static uint64_t gcopy_gen = 1;
 static struct { uint64_t lo, hi, serial; } uubt[UUB_MAX];  // ranges UpdateUniformBuffer wrote, with the last update's count
 static int nuub;
 static uint64_t uub_serial;
-static void guest_copy_flush(void) { __atomic_fetch_add(&gcopy_gen, 1, __ATOMIC_RELAXED); }
+// (mvec_sync: the motion vector thread reads guest memory after the draw that handed it the ranges, mvec.c)
+static void guest_copy_flush(void) { mvec_sync(); __atomic_fetch_add(&gcopy_gen, 1, __ATOMIC_RELAXED); }
 
 // UpdateUniformBuffer wrote [lo, hi)
 static void uub_note(uint64_t lo, uint64_t hi) {
@@ -1361,8 +1390,16 @@ const char *renderer_stats(void) {
     return stats_text;
 }
 
+static uint64_t vbuf_gen = 1;
+static uint64_t ubuf_gen[6] = {1, 1, 1, 1, 1, 1};
+static uint64_t rt_gen = 1, tex_gen[6] = {1, 1, 1, 1, 1, 1};
+
 static void st_defaults(void) {
     memset(&st, 0, sizeof st);
+    vbuf_gen++;
+    for (int i = 0; i < 6; i++) ubuf_gen[i]++;
+    rt_gen++;
+    for (int i = 0; i < 6; i++) tex_gen[i]++;
     for (int i = 0; i < 16; i++) {
         st.viewport[i][2] = 1280; st.viewport[i][3] = 720;
         st.scissor[i][2] = 16384; st.scissor[i][3] = 16384;
@@ -2708,6 +2745,10 @@ typedef struct {
     bool vs_uses_vid;
     uint8_t fs_gather;  // (up_fix) the fragment stage's first gathered texture: 0 not looked yet, 1 none, 2 + its slot
     _Atomic int state;  // 0 building, 1 ready, 2 failed
+    // Its motion vector variants once they are built (draw_, mvec.c), by the pass's motion target slot: [0] the motion
+    // program, [1] the reactive mask's. (Looked up through get_program for every scene draw, their keys made anew
+    // each time, they cost the translating thread ~0.2 ms a frame.)
+    void *mv[2][8];
 } Prog;
 
 // The push constants of a motion vector program (mvec.c MVEC_PUSH: the history offsets of the previous frame's
@@ -3960,12 +4001,15 @@ static const char *snap_reason = "?";
 // A snapshot of texture object t, or of its image through another object (BOTW reaches some targets through more than
 // one), is stale once t is written. SAVAGEWIND_VK_SNAP_BY_OBJECT=1: by object only, as before.
 static uint64_t snap_wpass[8];  // (the pass the latest write into the slot's target was in, since its snapshot; 0: none)
+static uint8_t snap_mask;
 static uint64_t snap_pass_now(void);
 static void snapshots_invalidate(NvnTexture *t) {
+    if (!snap_mask) return;
     static int by_obj = -1;
     if (by_obj < 0) by_obj = getenv("SAVAGEWIND_VK_SNAP_BY_OBJECT") ? atoi(getenv("SAVAGEWIND_VK_SNAP_BY_OBJECT")) != 0 : !g_vk.is_mali;
     TexBackend *be = t && !by_obj ? (TexBackend *)t->backend : NULL;
-    for (int i = 0; i < 8; i++) {
+    for (uint32_t m = snap_mask; m; m &= m - 1) {
+        int i = __builtin_ctz(m);
         if (!(!t || snap_tex[i] == t || (be && snap_be[i] == be))) continue;
         if (t) snap_wpass[i] = snap_pass_now();
         if (snap_ok[i]) { snap_ok[i] = false; snap_why[i] = snap_reason; }
@@ -4194,6 +4238,10 @@ static void resolve_feedback(Prog *pr) {
     static int off = -1;
     if (off < 0) off = getenv("SAVAGEWIND_NO_FEEDBACK") != NULL;
     if (off) return;
+    static struct { const ShaderInfo *vi, *fi; const void *tpool; uint64_t rt_gen, tgen0, tgen1; } rf_clean;
+    if (rf_clean.vi == pr->vi && rf_clean.fi == pr->fi && rf_clean.tpool == st.tpool &&
+        rf_clean.rt_gen == rt_gen && rf_clean.tgen0 == tex_gen[0] && rf_clean.tgen1 == tex_gen[1])
+        return;
     ShaderInfo *infos[2] = {pr->vi, pr->fi};
     for (int sg = 0; sg < 2; sg++)
         for (int i = 0; i < infos[sg]->ntex; i++) {
@@ -4525,6 +4573,7 @@ static void resolve_feedback(Prog *pr) {
             feedback_any_type[nfeedback] = false;
             feedback_view[nfeedback++] = vk_image_view(dst, VK_IMAGE_VIEW_TYPE_2D, src->format, 0, 1, 0, 1, id, sa);
             if (si < 0) { static int rr; si = rr++ & 7; snap_tex[si] = t; }
+            snap_mask |= (uint8_t)(1u << si);
             snap_ok[si] = true;
             snap_cleared[si] = false;
             snap_wpass[si] = 0;
@@ -4533,6 +4582,10 @@ static void resolve_feedback(Prog *pr) {
             snap_pass[si] = pass_serial + 1;  // (the pass that begins next, after this one ends)
             st.rt_dirty = true;
         }
+    if (!nfeedback && !draw_feedback)
+        rf_clean = (__typeof__(rf_clean)){pr->vi, pr->fi, st.tpool, rt_gen, tex_gen[0], tex_gen[1]};
+    else
+        rf_clean.vi = NULL;
 }
 
 // ================================================================== resource binding
@@ -4768,6 +4821,20 @@ static bool hud_patch(uint64_t addr, uint64_t size, VkDescriptorBufferInfo *out)
         }
     }
     if (!tb || tb->rs_group != RS_OUT) return false;
+    // The loading screen on a wider window shows at 16:9 (output_scale, #98), but the status icons it draws over its
+    // tip (hearts, stamina, rupees, the figures) use a layout projection the game made in play, widened to the window
+    // (rt_persp): they came out squeezed toward the middle, 1/shape as wide (#805). Back to 16:9 here.
+    if (shape == 1 && size >= 64 && g[0] > 0 && g[5] != 0 && framepace_loading_ui()) {  // (text: m11 < 0)
+        float ws = output_window_shape();
+        if (ws > 1.005f && fabsf(fabsf(g[5]) / g[0] - 16.0f / 9.0f * ws) < 0.002f * ws) {
+            static float lbuf[0x10000 / 4];
+            uint64_t n = size > sizeof lbuf ? sizeof lbuf : size;
+            memcpy(lbuf, g, n);
+            for (int k = 0; k < 4; k++) lbuf[k] *= ws;  // (clip x: the whole row, a text pane's position too)
+            *out = ubo_span(vk_transient_copy(lbuf, n, 256), n);
+            return true;
+        }
+    }
     float hud_s = hud_scale_now();
     if (shape == 1 && hud_s == 1) return false;
     int edge_mode = hud_edges_now(shape);
@@ -5369,7 +5436,9 @@ static bool gmem_sparse_refresh(uint64_t size) {
             .pBufferBinds = &buffer_bind,
             .signalSemaphoreCount = 1,
             .pSignalSemaphores = &gmem_sparse_timeline};
+        pthread_mutex_lock(&g_vk_queue_lock);
         VkResult r = vkQueueBindSparse(g_vk.queue, 1, &bind_info, VK_NULL_HANDLE);
+        pthread_mutex_unlock(&g_vk_queue_lock);
         if (r != VK_SUCCESS) {
             LOG("[vk] sparse guest heap batch binding failed (%d)\n", r);
             goto fail;
@@ -5913,16 +5982,34 @@ static bool gw_ubo_copied(int stage, uint32_t cbuf_mask) {  // a constant buffer
 // cbufs[stage]: the constant buffers each stage reads (ShaderInfo.cbuf_mask; 0: none).
 static void gw_check(const uint32_t cbufs[6], bool vertices, uint64_t iaddr, uint64_t isize) {
     if (!ngw) return;
+    static uint64_t chk_vbuf_gen, chk_vbuf_gw, chk_ubuf_gen[6], chk_ubuf_gw[6], chk_ubuf_gc[6];
+    static uint32_t chk_cbuf_mask[6];
+    uint64_t gc = __atomic_load_n(&gcopy_gen, __ATOMIC_RELAXED);
     bool wait = false;
-    for (int s = 0; s < 6 && !wait; s++)
-        if (cbufs[s]) wait = gw_ubo_copied(s, cbufs[s]);
+    for (int s = 0; s < 6 && !wait; s++) {
+        uint32_t m = cbufs[s];
+        if (!m) continue;
+        if (chk_ubuf_gen[s] == ubuf_gen[s] && chk_ubuf_gw[s] == gw_gen && chk_ubuf_gc[s] == gc && (chk_cbuf_mask[s] & m) == m)
+            continue;
+        wait = gw_ubo_copied(s, m);
+        if (!wait) {
+            if (chk_ubuf_gen[s] != ubuf_gen[s] || chk_ubuf_gw[s] != gw_gen || chk_ubuf_gc[s] != gc) {
+                chk_ubuf_gen[s] = ubuf_gen[s]; chk_ubuf_gw[s] = gw_gen; chk_ubuf_gc[s] = gc; chk_cbuf_mask[s] = m;
+            } else {
+                chk_cbuf_mask[s] |= m;
+            }
+        }
+    }
     VkBuffer b;
     VkDeviceSize off;
     // (the overlap first: it is rarely there, and guest_direct is the dearer of the two)
-    for (int i = 0; i < 16 && vertices && !wait; i++) {
-        Range v = st.vbuf[i];
-        uint64_t n = v.size ? v.size : 256;
-        if (v.addr && gw_overlaps(v.addr, v.addr + n)) wait = !guest_direct(v.addr, n, &b, &off);
+    if (vertices && !wait && (chk_vbuf_gen != vbuf_gen || chk_vbuf_gw != gw_gen)) {
+        for (int i = 0; i < 16 && !wait; i++) {
+            Range v = st.vbuf[i];
+            uint64_t n = v.size ? v.size : 256;
+            if (v.addr && gw_overlaps(v.addr, v.addr + n)) wait = !guest_direct(v.addr, n, &b, &off);
+        }
+        if (!wait) { chk_vbuf_gen = vbuf_gen; chk_vbuf_gw = gw_gen; }
     }
     if (iaddr && !wait && gw_overlaps(iaddr, iaddr + isize)) wait = !guest_direct(iaddr, isize, &b, &off);
     if (!wait) return;
@@ -6456,6 +6543,95 @@ static void vdyn_check(uint64_t seq) {
     }
     atomic_store_explicit(&vdyn_r, r, memory_order_release);
     pthread_mutex_unlock(&vdyn_lock);
+}
+
+// (testing) SAVAGEWIND_VK_RACE_PROBE=1: what the GPU reads of guest memory in place (or through the heap copy, which
+// the GPU fills when it gets to the list) changing between translation and the real wait on its submission, by kind
+// and size, whatever vdyn does: one fetch in 8 of every size up to 256 KB hashed when recorded and again after the
+// wait. A "[race]" line every 600 checks: samples, changes, and the biggest changed fetches.
+enum { RP_VTX_S, RP_VTX_L, RP_IDX_S, RP_IDX_L, RP_GW_VTX, RP_GW_IDX, RP_KINDS };
+static const char *const rp_kind_name[RP_KINDS] = {"vertex<=4K", "vertex>4K", "index<=4K", "index>4K", "gpu-written vertex",
+                                                   "gpu-written index"};
+#define RP_N 16384
+#define RP_MAX (256u << 10)
+static int rp_on = -1;
+static struct { uint64_t addr, size, hash, seq; int kind; } rp_chk[RP_N];
+static _Atomic uint64_t rp_sub_cpu[RP_KINDS];  // (of those: the CPU wrote the pages since translation - write watch)
+static _Atomic uint64_t rp_w, rp_r, rp_s;  // (written by the render thread; read after the wait / in the recorder's turn)
+static uint64_t rp_tick, rp_samples[RP_KINDS], rp_changed[RP_KINDS], rp_checks;
+static _Atomic uint64_t rp_sub_samples[RP_KINDS], rp_sub_changed[RP_KINDS];  // (changed before the GPU had the submission)
+static uint64_t rp_big_addr, rp_big_size;
+static pthread_mutex_t rp_lock = PTHREAD_MUTEX_INITIALIZER;
+static void race_probe_note(uint64_t addr, uint64_t size, bool index) {
+    if (rp_on < 0) {
+        rp_on = getenv("SAVAGEWIND_VK_RACE_PROBE") && atoi(getenv("SAVAGEWIND_VK_RACE_PROBE"));
+        if (rp_on) LOG("[race] probe on: in-place vertex / index fetches hashed at translation and after their wait\n");
+    }
+    if (!rp_on || !size || size > RP_MAX || addr < HEAP_BASE || addr + size > HEAP_BASE + HEAP_MAX || (++rp_tick & 7)) return;
+    bool gw = gw_overlaps(addr, addr + size);  // (GPU-written: may change by the GPU's own writes too)
+    uint64_t w = atomic_load_explicit(&rp_w, memory_order_relaxed), r = atomic_load_explicit(&rp_r, memory_order_acquire),
+             rs = atomic_load_explicit(&rp_s, memory_order_acquire);
+    if (w - (r < rs ? r : rs) >= RP_N) return;
+    __typeof__(rp_chk[0]) *c = &rp_chk[w % RP_N];
+    c->addr = addr, c->size = size, c->seq = vk_pending_seq();
+    c->kind = gw ? (index ? RP_GW_IDX : RP_GW_VTX) : (index ? RP_IDX_S : RP_VTX_S) + (size > VDYN_SAMPLE_MAX);
+    if (gw) {  // (the CPU's writes from here on, apart from the GPU's: write watch, reset now; the GPU's don't count there)
+        uint64_t pages[64];
+        plat_written_pages(addr & ~0xFFFull, ((addr + size + 0xFFF) & ~0xFFFull) - (addr & ~0xFFFull), pages, 64);
+    }
+    c->hash = hash_words(0x9E3779B97F4A7C15ull, (const void *)(uintptr_t)addr, size & ~3ull);
+    atomic_store_explicit(&rp_w, w + 1, memory_order_release);
+}
+static void race_probe_check(uint64_t seq) {
+    if (rp_on <= 0 || pthread_mutex_trylock(&rp_lock)) return;
+    uint64_t r = atomic_load_explicit(&rp_r, memory_order_relaxed), w = atomic_load_explicit(&rp_w, memory_order_acquire);
+    for (; r < w && rp_chk[r % RP_N].seq <= seq; r++) {
+        __typeof__(rp_chk[0]) *c = &rp_chk[r % RP_N];
+        rp_samples[c->kind]++;
+        if (hash_words(0x9E3779B97F4A7C15ull, (const void *)(uintptr_t)c->addr, c->size & ~3ull) == c->hash) continue;
+        rp_changed[c->kind]++;
+        if (c->size > rp_big_size) rp_big_size = c->size, rp_big_addr = c->addr;
+    }
+    atomic_store_explicit(&rp_r, r, memory_order_release);
+    if (++rp_checks % 600 == 0) {
+        char line[512];
+        int n = 0;
+        for (int k = 0; k < RP_KINDS; k++)
+            n += snprintf(line + n, sizeof line - n, " %s %llu/%llu", rp_kind_name[k], (unsigned long long)rp_changed[k],
+                          (unsigned long long)rp_samples[k]);
+        LOG("[race] changed while read (of sampled):%s; biggest %llu bytes at %llx\n", line, (unsigned long long)rp_big_size,
+            (unsigned long long)rp_big_addr);
+        n = 0;
+        for (int k = 0; k < RP_KINDS; k++)
+            n += snprintf(line + n, sizeof line - n, " %s %llu/%llu (CPU %llu)", rp_kind_name[k],
+                          (unsigned long long)atomic_exchange(&rp_sub_changed[k], 0), (unsigned long long)atomic_exchange(&rp_sub_samples[k], 0),
+                          (unsigned long long)atomic_exchange(&rp_sub_cpu[k], 0));
+        LOG("[race] changed before the GPU had the submission:%s\n", line);
+        memset(rp_samples, 0, sizeof rp_samples);
+        memset(rp_changed, 0, sizeof rp_changed);
+        rp_big_size = rp_big_addr = 0;
+    }
+    pthread_mutex_unlock(&rp_lock);
+}
+
+// (recorder's turn, right before submission seq goes to the driver) the samples recorded into it, hashed again: a change
+// here was made after translation and before the GPU could read it
+static void race_probe_submit_run(void *arg) {
+    uint64_t seq = (uint64_t)(uintptr_t)arg;
+    uint64_t s = atomic_load_explicit(&rp_s, memory_order_relaxed), w = atomic_load_explicit(&rp_w, memory_order_acquire);
+    for (; s < w && rp_chk[s % RP_N].seq <= seq; s++) {
+        __typeof__(rp_chk[0]) *c = &rp_chk[s % RP_N];
+        atomic_fetch_add_explicit(&rp_sub_samples[c->kind], 1, memory_order_relaxed);
+        if (hash_words(0x9E3779B97F4A7C15ull, (const void *)(uintptr_t)c->addr, c->size & ~3ull) != c->hash) {
+            atomic_fetch_add_explicit(&rp_sub_changed[c->kind], 1, memory_order_relaxed);
+            if (plat_any_written(c->addr, c->size) == 1) atomic_fetch_add_explicit(&rp_sub_cpu[c->kind], 1, memory_order_relaxed);
+        }
+    }
+    atomic_store_explicit(&rp_s, s, memory_order_release);
+}
+static void race_probe_submit(uint64_t seq) {
+    if (rp_on > 0) rec_custom(race_probe_submit_run, (void *)(uintptr_t)seq);
+    else if (rp_on == 0) atomic_store_explicit(&rp_s, atomic_load_explicit(&rp_w, memory_order_relaxed), memory_order_relaxed);
 }
 
 static void vdyn_reset(void) {  // (vk_exec_reset, the GPU idle: another boot, other buffers)
@@ -8242,60 +8418,78 @@ static void draw_(CmdRec *r, bool indexed) {
     // ---- motion vectors (mvec.c): an opaque draw of a pass with the motion target is recorded (its identity and the
     // vertex shader's inputs, for the next frame); matched with one of the previous frame, it is drawn with its motion
     // program: the vertex shader also run on the previous frame's inputs, the fragment shader also writing the distance
-    uint32_t mvec_pc[MVEC_PUSH / 4];
+    uint32_t mvec_seq = 0;
     bool mvec_draw = false;
     // Full-screen triangles and quads that write depth (BOTW fills the scene's depth with several: sky, far plane)
     // keep no vector: drawn after the geometry, their camera-independent positions would cover it with zeros (they get
     // the camera's motion in the fallback).
     bool fullscreen = r->x[2] <= 6 && st.viewport[0][2] >= pass_w * 0.9f / pass_sx && st.viewport[0][3] >= pass_h * 0.9f / pass_sy;
-    if (pass_mvec >= 0 && st.ds[0] && st.ds[1]) {
-        MvecDrawIn md;  // (its streams and buffers past nstream and ncb are not read: zeroing all of it, ~1 KB a draw, was not free)
-        memset(&md, 0, offsetof(MvecDrawIn, stream));
-        md.vs_streams = 0, md.ncb = 0;
-        md.frame = renderer_present_count();
-        md.gen = __atomic_load_n(&gcopy_gen, __ATOMIC_RELAXED);
-        md.vs = st.program->stages[0].code_addr;
-        md.fs = st.program->stages[1].code_addr;
-        md.count = (uint32_t)r->x[2];
+    MvecDrawIn *mdp = pass_mvec >= 0 && st.ds[0] && st.ds[1] ? mvec_draw_begin(renderer_present_count()) : NULL;
+    if (mdp) {
+#define md (*mdp)  // (mvec.c's place for the draw being described: only what the head counts is handed on)
+        md.h.iaddr = 0, md.h.first = 0, md.h.base_vertex = 0;
+        md.h.ncb = 0, md.h.ninst = 0, md.h.skey = 0;
+        md.h.gen = __atomic_load_n(&gcopy_gen, __ATOMIC_RELAXED);
+        md.h.pkey = mvec_mix(st.program->stages[0].code_addr, st.program->stages[1].code_addr);
+        md.h.vi = pr->vi;
+        md.h.count = (uint32_t)r->x[2];
         if (indexed) {
-            md.iaddr = r->x[3]; md.base_vertex = (int32_t)r->x[4]; md.base_inst = (uint32_t)r->x[5];
-            md.inst = (uint32_t)r->x[6] ? (uint32_t)r->x[6] : 1;
+            md.h.iaddr = r->x[3]; md.h.base_vertex = (int32_t)r->x[4]; md.h.base_inst = (uint32_t)r->x[5];
+            md.h.inst = (uint32_t)r->x[6] ? (uint32_t)r->x[6] : 1;
         } else {
-            md.first = (uint32_t)r->x[1]; md.base_inst = (uint32_t)r->x[3]; md.inst = (uint32_t)r->x[4] ? (uint32_t)r->x[4] : 1;
+            md.h.first = (uint32_t)r->x[1]; md.h.base_inst = (uint32_t)r->x[3]; md.h.inst = (uint32_t)r->x[4] ? (uint32_t)r->x[4] : 1;
         }
-        md.nstream = st.nstream;
-        for (int s = 0; s < st.nstream && s < 16; s++)
-            md.stream[s] = (MvecStream){st.vbuf[s].addr, st.vbuf[s].size, st.stream[s][0], st.stream[s][1]};
+        // the streams the vertex shader's attributes read: per-vertex ones are part of the draw's identity (their
+        // addresses), instanced ones are inputs (copied by mvec.c)
+        uint32_t vs_streams = 0;
         for (int a = 0; a < 16 && a < st.nattrib; a++)
-            if ((pr->vi->attr_mask >> a) & 1) md.vs_streams |= 1u << ((st.attrib[a] >> 8) & 0x1F);
-        for (int k = 3; k < 17 && md.ncb < MVEC_CB; k++) {  // (the game's buffers: cbuf_info's k >= 3)
+            if ((pr->vi->attr_mask >> a) & 1) vs_streams |= 1u << ((st.attrib[a] >> 8) & 0x1F);
+        for (uint32_t m = vs_streams & 0xFFFF; m; m &= m - 1) {
+            int s = __builtin_ctz(m);
+            if (s >= st.nstream || !st.vbuf[s].addr) continue;
+            if (!st.stream[s][1]) md.h.skey = mvec_mix(md.h.skey, st.vbuf[s].addr);
+            else if (md.h.ninst < MVEC_INST)
+                md.in[md.h.ninst++] = (MvecInst){st.vbuf[s].addr, st.vbuf[s].size, st.stream[s][0], st.stream[s][1], (uint32_t)s, 0};
+        }
+        for (int k = 3; k < 17 && md.h.ncb < MVEC_CB; k++) {  // (the game's buffers: cbuf_info's k >= 3)
             Range u = st.ubuf[0][k - 3];
             if (!((pr->vi->cbuf_mask >> k) & 1) || !u.addr) continue;
             uint64_t size = pr->vi->cbuf_size[k] ? pr->vi->cbuf_size[k] : 256;
             if ((pr->vi->cbuf_dynamic & (1u << k)) && u.size) size = u.size > 0x10000 ? 0x10000 : u.size;
             if (size > u.size && u.size) size = u.size;
-            md.cb[md.ncb].rows = (pr->vi->cbuf_rows_all >> k) & 1 ? NULL : pr->vi->cbuf_rows[k];
-            md.cb[md.ncb].slot = (uint8_t)k; md.cb[md.ncb].addr = u.addr; md.cb[md.ncb++].size = size;
+            md.cb[md.h.ncb++] = (MvecCb){u.addr, (uint32_t)size, (uint8_t)k, {0}};
         }
-        int rec = mvec_record(&md);
-        // a draw that stood still (mvec_still) or got no vector of its own writes zero, the camera's motion (mvec_fill),
-        // over what a draw behind it wrote
-        bool still = rec >= 0 && !fullscreen && mvec_still(rec);
-        bool pushed = !still && rec >= 0 && !fullscreen && mvec_push(rec, mvec_pc);
-        if (rec >= 0 && !fullscreen) {
-            ShaderKey mvk = {0}, mfk = {0};
-            mvk.glsl = mfk.glsl = 1;
-            mvk.flip_y = mfk.flip_y = origin == 0;
-            mvk.depth_minus_one = dmode == 0;
-            for (int i = 0; i < st.nattrib; i++) mvk.attr_kind[i] = (uint8_t)attr_kind(st.attrib[i] & 0xFF);
-            for (int i = 0; i < st.rt.ncolor; i++) if (st.rt.color[i]) mfk.rt_kind[i] = (uint8_t)rt_kind(st.rt.color[i]->format);
-            mvk.mvec = pushed;
-            mfk.mvec_rt = (uint8_t)((pushed ? 0 : 0x40) | (pass_mvec + 1));
-            Prog *mp = get_program(st.program, &mvk, &mfk);
-            if (mp && atomic_load(&mp->state) == 1) {  // (else built later)
+#undef md
+        mvec_seq = mvec_draw_commit();
+        // Its motion program: the vertex shader also run on the previous frame's inputs when the draw moved, which
+        // mvec.c's thread tells the recorder (the push constants' mflag, rec_CmdPushConstantsMvec); a draw that stood
+        // still or got no match writes zero, the camera's motion (mvec_fill), over what a draw behind it wrote.
+        // Until that program is built, or when it can't be (its varyings 30 / 31 taken): the still variant, zero.
+        if (!fullscreen) {
+            Prog *mp = pr->mv[0][pass_mvec];
+            if (mp) {
                 pr = mp;
-                mvec_draw = pushed || still;
-                if (pushed) mvec_drawn();
+                mvec_draw = true;
+            } else {
+                ShaderKey mvk = {0}, mfk = {0};
+                mvk.glsl = mfk.glsl = 1;
+                mvk.flip_y = mfk.flip_y = origin == 0;
+                mvk.depth_minus_one = dmode == 0;
+                for (int i = 0; i < st.nattrib; i++) mvk.attr_kind[i] = (uint8_t)attr_kind(st.attrib[i] & 0xFF);
+                for (int i = 0; i < st.rt.ncolor; i++) if (st.rt.color[i]) mfk.rt_kind[i] = (uint8_t)rt_kind(st.rt.color[i]->format);
+                mvk.mvec = 1;
+                mfk.mvec_rt = (uint8_t)(pass_mvec + 1);
+                mp = get_program(st.program, &mvk, &mfk);
+                if (mp && atomic_load(&mp->state) == 1) {  // (else built later)
+                    pr->mv[0][pass_mvec] = mp;
+                    pr = mp;
+                    mvec_draw = true;
+                } else {
+                    mvk.mvec = 0;
+                    mfk.mvec_rt = (uint8_t)(0x40 | (pass_mvec + 1));
+                    mp = get_program(st.program, &mvk, &mfk);
+                    if (mp && atomic_load(&mp->state) == 1) pr = mp;
+                }
             }
         }
     }
@@ -8308,15 +8502,20 @@ static void draw_(CmdRec *r, bool indexed) {
     static int show_unmatched = -1;
     if (show_unmatched < 0) show_unmatched = getenv("SAVAGEWIND_MVEC_SHOW_UNMATCHED") != NULL;
     if (pass_mvec >= 0 && ((!(st.ds[0] && st.ds[1]) && (st.color_state[0] & 1)) || (show_unmatched && st.ds[0] && st.ds[1] && !mvec_draw)) && !fullscreen) {
-        ShaderKey mvk = {0}, mfk = {0};
-        mvk.glsl = mfk.glsl = 1;
-        mvk.flip_y = mfk.flip_y = origin == 0;
-        mvk.depth_minus_one = dmode == 0;
-        for (int i = 0; i < st.nattrib; i++) mvk.attr_kind[i] = (uint8_t)attr_kind(st.attrib[i] & 0xFF);
-        for (int i = 0; i < st.rt.ncolor; i++) if (st.rt.color[i]) mfk.rt_kind[i] = (uint8_t)rt_kind(st.rt.color[i]->format);
-        mfk.mvec_rt = (uint8_t)(0x80 | (pass_mvec + 1));
-        Prog *mp = get_program(st.program, &mvk, &mfk);
-        if (mp && atomic_load(&mp->state) == 1) pr = mp, mvec_masked();  // (else built for the next frames)
+        Prog *mp = pr->mv[1][pass_mvec];
+        if (!mp) {
+            ShaderKey mvk = {0}, mfk = {0};
+            mvk.glsl = mfk.glsl = 1;
+            mvk.flip_y = mfk.flip_y = origin == 0;
+            mvk.depth_minus_one = dmode == 0;
+            for (int i = 0; i < st.nattrib; i++) mvk.attr_kind[i] = (uint8_t)attr_kind(st.attrib[i] & 0xFF);
+            for (int i = 0; i < st.rt.ncolor; i++) if (st.rt.color[i]) mfk.rt_kind[i] = (uint8_t)rt_kind(st.rt.color[i]->format);
+            mfk.mvec_rt = (uint8_t)(0x80 | (pass_mvec + 1));
+            mp = get_program(st.program, &mvk, &mfk);
+            if (mp && atomic_load(&mp->state) != 1) mp = NULL;  // (built for the next frames)
+            if (mp) pr->mv[1][pass_mvec] = mp;
+        }
+        if (mp) pr = mp, mvec_masked();
     }
     if (st.rt.depth && !depth_read_only()) pass_ds_written = true;
     for (int i = 0; i < st.rt.ncolor && i < 8; i++)
@@ -8688,7 +8887,7 @@ have_pipe:
         dc.ndyn = (uint32_t)ndyn;
         memcpy(dc.dyn, dyn, (size_t)ndyn * 4);
     }
-    if (mvec_draw) rec_CmdPushConstants(cb, pr->layout, VK_SHADER_STAGE_VERTEX_BIT, 0, MVEC_PUSH, mvec_pc);
+    if (mvec_draw) rec_CmdPushConstantsMvec(cb, pr->layout, mvec_seq);
 
     uint64_t prof_t2_ = profd ? SDL_GetTicksNS() : 0;
     ProfZone pz7 = PZ_NOW();
@@ -8724,6 +8923,7 @@ have_pipe:
             icount = count;
             if (iaddr % isz == 0 && guest_fetch(iaddr, (uint64_t)count * isz, &ib.buf, &ib.off)) {
                 if (profd) prof_index_direct++;
+                race_probe_note(iaddr, (uint64_t)count * isz, true);
                 scan_src = src; scan_isz = isz; scan_restart = restart;  // max_index only if a stream gets copied
             } else {
                 if (profd) prof_index_copy++;
@@ -8762,8 +8962,8 @@ have_pipe:
     }
 
     // ---- vertex streams: the range this draw can read, copied once per submission
-    for (int s = 0; s < 17; s++) {
-        if (!(pipe_memo.k.s.used_streams & (1u << s))) continue;
+    for (uint32_t sm = pipe_memo.k.s.used_streams & ((1u << 17) - 1); sm; sm &= sm - 1) {
+        int s = __builtin_ctz(sm);
         VkSpan sp;
         if (s == ZERO_BINDING) {
             static const float zero[4] = {0, 0, 0, 1};
@@ -8774,6 +8974,7 @@ have_pipe:
             VkDeviceSize doff;
             if (v.addr && v.size && guest_fetch(v.addr, v.size, &dbuf, &doff)) {
                 if (profd) prof_vertex_direct++;
+                race_probe_note(v.addr, v.size, false);
                 if (dc.vbuf[s] != dbuf || dc.voff[s] != doff) {
                     rec_CmdBindVertexBuffers(cb, (uint32_t)s, 1, &dbuf, &doff);
                     dc.vbuf[s] = dbuf; dc.voff[s] = doff;
@@ -8854,6 +9055,7 @@ have_pipe:
 }
 
 static void debug_save_channels(TexBackend *b, const char *path);
+static void debug_save_3d(TexBackend *b, const char *path);
 
 static void debug_draw(Prog *pr, CmdRec *r, bool indexed) {
     LOG("[draw] %s inst %llu mode %llu count %llu prog vs=%llx fs=%llx | vs cb %#x fs cb %#x | rt %d", indexed ? "e" : "a",
@@ -8994,6 +9196,12 @@ static void debug_draw(Prog *pr, CmdRec *r, bool indexed) {
                 snprintf(path, sizeof path, "build/dtex_%016llx_%d.%s", (unsigned long long)g_cur_fs_hash, i,
                          b->aspect & VK_IMAGE_ASPECT_DEPTH_BIT ? "pgm" : "png");
                 vk_end_pass();
+                if (b->base_type == VK_IMAGE_VIEW_TYPE_3D) {
+                    snprintf(path, sizeof path, "build/gpu3d_%llu_%ux%ux%u_f%x.raw", (unsigned long long)t->debug_id, b->width,
+                             b->height, b->depth, t->format);
+                    debug_save_3d(b, path);
+                    continue;
+                }
                 if (b->aspect & VK_IMAGE_ASPECT_DEPTH_BIT) debug_save_depth(b, path);
                 else debug_save_channels(b, path);
                 LOG("[draw]   tex%d saved as %s\n", i, path);
@@ -9076,6 +9284,14 @@ static void debug_draw(Prog *pr, CmdRec *r, bool indexed) {
                         LOG("%s%.6g", k % 16 == 0 ? "\n[draw]     " : k % 4 ? " " : " | ", f[k]);
                     LOG("\n");
                 }
+            for (int sg = 0; sg < 2; sg++) {  // the compiler constants (c1) of either stage, exact
+                const NvnShaderStage *ss = &st.program->stages[sg];
+                if (!ss->code_addr || !ss->const_size) continue;
+                const uint32_t *u = (const uint32_t *)(uintptr_t)(ss->code_addr + ss->const_offset);
+                LOG("[draw]   %ccb1 size %u:", sg ? 'f' : 'v', ss->const_size);
+                for (uint32_t k = 0; k < 256 && k * 4 < ss->const_size; k++) LOG(" %08x", u[k]);
+                LOG("\n");
+            }
         }
     }
 }
@@ -10439,7 +10655,7 @@ static TexBackend *dlss_scene(VkCommandBuffer cb, TexBackend *color, uint32_t ow
         if (md && !strcmp(md, "off")) jx = jy = 0;
         else if (md && strlen(md) == 2) jx *= md[0] == 'n' ? -1 : 1, jy *= md[1] == 'n' ? -1 : 1;
     }
-    bool ok = vk_dlss_apply(cb, color, db, mv, o, (unsigned)g_settings.upscale_quality, jx, jy, sx, sy, reset);
+    bool ok = vk_dlss_apply(cb, color, db, mv, o, (unsigned)upscale_quality_now(), jx, jy, sx, sy, reset);
     // (the next frames' jitter sequence: 8 x the upscale's area, NVIDIA's recommended length)
     float area = (float)ow * (float)oh / ((float)w * (float)h);
     rt_jitter_set_phases((uint32_t)ceilf(8.0f * (area > 1 ? area : 1)));
@@ -10561,6 +10777,30 @@ static TexBackend *mvec_taa(VkCommandBuffer cb, TexBackend *b, uint64_t frame) {
     n ^= 1;
     const VkImageUsageFlags S = VK_IMAGE_USAGE_STORAGE_BIT;
     const VkFormat F16 = VK_FORMAT_R16G16B16A16_SFLOAT, R8 = VK_FORMAT_R8_UNORM;
+    // The light TAA, one pass (shaders.c taa_lite), unless SAVAGEWIND_TAA=full: the seven passes below, FSR 3.1's
+    // whole reconstruction, cost the GPU ~2.5 ms at 1440p and ~6 ms at 4K on an RTX 3060 (TAA took 20-30 fps off)
+    static int full = -1;
+    if (full < 0) full = getenv("SAVAGEWIND_TAA") && !strcmp(getenv("SAVAGEWIND_TAA"), "full");
+    if (!full) {
+        TexBackend *hist[2] = {post_image_ex(11, w, h, F16, S), post_image_ex(12, w, h, F16, S)};
+        TexBackend *out = post_image_ex(31, w, h, F16, S);
+        static const VkComponentMapping id = {0};
+        float flip = nvn_window_origin() == 0 ? -1.0f : 1.0f;
+        float pc[16] = {(float)w, (float)h, 1.0f / (float)w, 1.0f / (float)h, jit[0] * (float)w * 0.5f,
+                        -jit[1] * flip * (float)h * 0.5f, 0, 0, 0, 0, 0, 0, valid ? 1.0f : 0.0f, 8.0f, 0, 0};
+        VkImageView in[] = {vk_image_view(b, VK_IMAGE_VIEW_TYPE_2D, b->format, 0, 1, 0, 1, id, VK_IMAGE_ASPECT_COLOR_BIT),
+                            post_view(mvec_vectors_img),
+                            vk_image_view(db, VK_IMAGE_VIEW_TYPE_2D, db->format, 0, 1, 0, 1, id, VK_IMAGE_ASPECT_DEPTH_BIT),
+                            post_view(hist[p])};
+        TexBackend *o[] = {hist[c], out};
+        vk_full_barrier(cb);
+        cpost_pass(cb, "taa_lite.comp", in, 4, o, 2, pc, w, h);
+        vk_full_barrier(cb);
+        gp_mark(cb, "post taa end");
+        last = frame;
+        lw = w, lh = h;
+        return out;
+    }
     uint32_t w2 = (w + 1) / 2, h2 = (h + 1) / 2, w4 = (w2 + 1) / 2, h4 = (h2 + 1) / 2, w8 = (w4 + 1) / 2, h8 = (h4 + 1) / 2;
     TexBackend *dil = post_image_ex(16, w, h, VK_FORMAT_R32G32B32A32_SFLOAT, S);
     TexBackend *luma[2] = {post_image_ex(17, w, h, VK_FORMAT_R16_SFLOAT, S), post_image_ex(18, w, h, VK_FORMAT_R16_SFLOAT, S)};
@@ -10652,6 +10892,17 @@ static TexBackend *mvec_taa(VkCommandBuffer cb, TexBackend *b, uint64_t frame) {
 // clip-space NDC differences (y up, the image's y down: mvec_fill.frag), FSR wants the UV offset to where the pixel was:
 // (-x / 2, y / 2), its motion vector scale over the render size. Its jitter is in render pixels, y down. NULL when an
 // input is missing (no camera yet, sizes that differ) or FSR failed: the scene goes on without it.
+typedef struct { Fsr3Dispatch d; int api; } FsrJob;
+static _Atomic int fsr3_failed;
+// The recorder thread: AMD's DLLs when asked for (their failing, logged there and remembered by fsr_api_usable: the
+// built-in FSR 3.1 in their place, from this frame on, without the history of the other upscaler), else the built-in one
+static void fsr3_run(void *arg) {
+    FsrJob *j = arg;
+    bool amd_ok = j->api && fsr_api_dispatch(&j->d, j->api);
+    if (j->api && !amd_ok) j->d.reset = true;
+    if (!amd_ok && !(fsr3_available() && fsr3_dispatch(&j->d))) atomic_store(&fsr3_failed, 1);
+}
+
 static TexBackend *fsr3_scene(VkCommandBuffer cb, TexBackend *b, uint32_t ow, uint32_t oh) {
     uint64_t frame = renderer_present_count();
     TexBackend *v = mvec_vectors_img, *db = mvec_depth ? vk_tex(mvec_depth, false) : NULL;
@@ -10702,12 +10953,16 @@ static TexBackend *fsr3_scene(VkCommandBuffer cb, TexBackend *b, uint32_t ow, ui
     if (api != last_api) d.reset = true;
     last_api = api;
     gp_mark(cb, api == 4 ? "FSR 4 upscaler" : "FSR 3 upscaler");
-    rec_drain();  // (FidelityFX records into cb itself, and may wait for the device: what was queued before goes first)
-    // (AMD's failing, logged there: the built-in FSR 3.1 in its place, from this frame on, without the history of the
-    // other upscaler)
-    bool amd_ok = api && fsr_api_dispatch(&d, api);
-    if (api && !amd_ok) d.reset = true, api = 0, last_api = 0;
-    if (!amd_ok && !(fsr3_available() && fsr3_dispatch(&d))) return NULL;
+    // FidelityFX records into cb itself, and may wait for the device: the recorder thread makes the call, in its turn
+    // (fsr3_run; with the recorder off, here and now). Waiting for the recorder and dispatching here cost this thread
+    // ~0.18 ms a frame (RTX 3060, 1440p Quality), where it limits the frame rate. Whether it worked is known a frame
+    // late: a failure leaves this frame's output undefined and the scene goes on without FSR from the next.
+    if (atomic_load(&fsr3_failed)) return NULL;
+    static FsrJob jobs[8];  // (the recorder is never 8 frames behind: a submission a frame waits for it)
+    static unsigned nj;
+    FsrJob *j = &jobs[nj++ & 7];
+    j->d = d, j->api = api;
+    rec_custom(fsr3_run, j);
     gp_mark(cb, api == 4 ? "after FSR 4" : "after FSR 3");
     last = frame;
     vk_dyn_forget();  // (FSR's own pipelines and sets were bound)
@@ -10817,6 +11072,28 @@ static void save_view_png(TexBackend *b, VkImageView src, const char *path) {
     vk_save_png(path, out.ptr, w, h);
     vkDestroyImageView(g_vk.dev, tv, NULL);
     vmaDestroyImage(g_vk.vma, img, mem);
+}
+
+// (debugging) A 3D image's level 0 as the GPU holds it, raw texels (x, then y, then z), for comparing with what was
+// uploaded (SAVAGEWIND_DUMP_TEX3D). debug_save_channels can't show 3D images.
+static void debug_save_3d(TexBackend *b, const char *path) {
+    uint32_t bpp = b->format == VK_FORMAT_R16G16B16A16_SFLOAT ? 8 : b->format == VK_FORMAT_R32G32B32A32_SFLOAT ? 16
+                 : b->format == VK_FORMAT_R8_UNORM ? 1 : b->format == VK_FORMAT_R16_SFLOAT || b->format == VK_FORMAT_R8G8_UNORM ? 2 : 4;
+    uint64_t size = (uint64_t)b->width * b->height * b->depth * bpp;
+    vk_end_pass();
+    VkCommandBuffer cb = vk_cmd();
+    vk_full_barrier(cb);
+    VkSpan out = vk_readback(size);
+    VkBufferImageCopy c = {.bufferOffset = out.off, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                           .imageExtent = {b->width, b->height, b->depth}};
+    rec_CmdCopyImageToBuffer(cb, b->image, VK_IMAGE_LAYOUT_GENERAL, out.buf, 1, &c);
+    vk_full_barrier(cb);
+    renderer_flush();
+    vk_readback_sync();
+    FILE *f = fopen(path, "wb");
+    if (f) fwrite(out.ptr, 1, size, f), fclose(f);
+    LOG("[vk] 3D image %ux%ux%u vk format %d (%u bytes a texel) read back from the GPU: %s\n", b->width, b->height, b->depth,
+        b->format, bpp, f ? path : "(not saved)");
 }
 
 // ================================================================== executor (renderer.m exec_list)
@@ -10935,6 +11212,7 @@ void vk_list_stats_frame(void) {  // (device.c, each present)
 
 static void exec_list(uint64_t handle, int depth) {
     uint64_t p = handle;
+    if (depth == 0) { tex_gen[0]++; tex_gen[1]++; }
     if (lst_on < 0) lst_on = getenv("SAVAGEWIND_VK_LIST_STATS") != NULL;
     if (lst_on) lst_begin(depth);
     for (int guard = 0; guard < 10000000; guard++) {
@@ -10994,10 +11272,12 @@ static void exec_list(uint64_t handle, int depth) {
             break;
         case CMD_BIND_VERTEX_BUFFERS:
             for (uint64_t i = 0; i < r->x[1] && r->x[0] + i < 16; i++) memcpy(&st.vbuf[r->x[0] + i], (uint8_t *)x + i * 16, 16);
+            vbuf_gen++;
             break;
         case CMD_BIND_UNIFORM_BUFFERS:
             for (uint64_t i = 0; i < r->x[2] && r->x[1] + i < 18 && r->x[0] < 6; i++)
                 memcpy(&st.ubuf[r->x[0]][r->x[1] + i], (uint8_t *)x + i * 16, 16);
+            if (r->x[0] < 6) ubuf_gen[r->x[0]]++;
             if (g_debug_frame && getenv("SAVAGEWIND_LOG_BINDS")) {
                 LOG("[bind] ubuf stage %llu slots %llu+%llu:", (unsigned long long)r->x[0], (unsigned long long)r->x[1],
                     (unsigned long long)r->x[2]);
@@ -11015,6 +11295,7 @@ static void exec_list(uint64_t handle, int depth) {
         case CMD_BIND_TEXTURES:
             for (uint64_t i = 0; i < r->x[2] && r->x[1] + i < 32 && r->x[0] < 6; i++)
                 memcpy(&st.tex[r->x[0]][r->x[1] + i], (uint8_t *)x + i * 8, 8);
+            if (r->x[0] < 6) tex_gen[r->x[0]]++;
             if (g_debug_frame && getenv("SAVAGEWIND_LOG_BINDS")) {
                 LOG("[bind] stage %llu slots %llu+%llu:", (unsigned long long)r->x[0], (unsigned long long)r->x[1],
                     (unsigned long long)r->x[2]);
@@ -11033,12 +11314,13 @@ static void exec_list(uint64_t handle, int depth) {
             if (r->x[3] >= GUEST_LO && r->x[3] + r->x[2] * 8 <= GUEST_HI)
                 for (uint64_t i = 0; i < r->x[2] && r->x[1] + i < 32 && r->x[0] < 6; i++)
                     memcpy(&st.tex[r->x[0]][r->x[1] + i], (const uint8_t *)(uintptr_t)r->x[3] + i * 8, 8);
+            if (r->x[0] < 6) tex_gen[r->x[0]]++;
             break;
         case CMD_BIND_IMAGES:
             for (uint64_t i = 0; i < r->x[2] && r->x[1] + i < 8 && r->x[0] < 6; i++)
                 memcpy(&st.img[r->x[0]][r->x[1] + i], (uint8_t *)x + i * 8, 8);
             break;
-        case CMD_SET_TEXTURE_POOL: st.tpool = (NvnDescPool *)(uintptr_t)r->x[0]; break;
+        case CMD_SET_TEXTURE_POOL: st.tpool = (NvnDescPool *)(uintptr_t)r->x[0]; tex_gen[0]++; tex_gen[1]++; break;
         case CMD_SET_SAMPLER_POOL: st.spool = (NvnDescPool *)(uintptr_t)r->x[0]; break;
         case CMD_SET_RENDER_TARGETS: {
             const struct { uint64_t tex[8]; NvnTextureView views[8]; uint8_t has_view[8]; uint64_t depth;
@@ -11056,7 +11338,7 @@ static void exec_list(uint64_t handle, int depth) {
             st.rt.has_dview = rt->has_dview;
             static int always = -1;
             if (always < 0) always = getenv("SAVAGEWIND_VK_PASS_RESTART") != NULL;
-            if (always || memcmp(&prev, &st.rt, sizeof prev)) st.rt_dirty = true;
+            if (always || memcmp(&prev, &st.rt, sizeof prev)) { st.rt_dirty = true; rt_gen++; }
             if (nfbrun && memcmp(&prev, &st.rt, sizeof prev)) fbdump_flush();
             if (logfb > 0 && !fbskip && memcmp(&prev, &st.rt, sizeof prev))
                 LOG("[feedback] targets %d (%ux%u fmt %#x) depth %d after %u draws\n", st.rt.ncolor, st.rt.ncolor && st.rt.color[0] ? st.rt.color[0]->width : 0,
@@ -11162,6 +11444,7 @@ static void exec_list(uint64_t handle, int depth) {
             stat_uub++;
             // The same bytes again (~1 update in 5 in the open world): the copies over the range stay good.
             if (!memcmp((void *)(uintptr_t)(r->x[0] + r->x[2]), x, r->x[3])) { stat_uub_same++; break; }
+            mvec_guest_write(r->x[0] + r->x[2], r->x[0] + r->x[2] + r->x[3]);  // (mvec.c: a draw its thread has not read yet)
             memcpy((void *)(uintptr_t)(r->x[0] + r->x[2]), x, r->x[3]);
             hc_cpu_wrote(r->x[0] + r->x[2], r->x[3]);
             uub_note(r->x[0] + r->x[2], r->x[0] + r->x[2] + r->x[3]);  // (the shared copies over it are stale now)
@@ -11254,6 +11537,7 @@ void backend_execute(uint64_t handle) {
         guest_copy_flush();  // (a new list: the game may have written the memory of the last one's copies since)
         hc_list_begin();
         exec_list(handle, 0);
+        mvec_sync();  // (the game may write the list's memory from here on)
     }
     in_execute = false;
     PROF_ADD(prof_exec);
