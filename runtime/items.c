@@ -1,7 +1,7 @@
 // The game's items, for the give command and the overlay's Cheats tab: see runtime/items.h.
 //
 // The list: every actor of Actor/ActorInfo.product.sbyml (BYML) tagged CanGetPouch, by profile (weapons, bows,
-// shields, arrows, armour, materials), leaving out the ones tagged Important (the Sheikah Slate, the Master Sword,
+// shields, arrows, armour, materials including captured critters), leaving out the ones tagged Important (the Sheikah Slate, the Master Sword,
 // quest items, Korok seeds), cooked dishes (CookResult: they need their effects) and rupees. Each has the name the
 // game gives it, <actor>_Name in Message/Msg_<lang>.product.ssarc's ActorType/*.msbt inside Pack/Bootup_<lang>.pack;
 // one without a name is left out, and of several actors with one name (armour's upgrade levels, dyes) the first by
@@ -220,6 +220,7 @@ static void list_read(void) {
         {"WeaponSmallSword", ITEMCAT_WEAPON}, {"WeaponLargeSword", ITEMCAT_WEAPON}, {"WeaponSpear", ITEMCAT_WEAPON},
         {"WeaponBow", ITEMCAT_BOW}, {"WeaponShield", ITEMCAT_SHIELD}, {"Bullet", ITEMCAT_ARROW},
         {"ArmorHead", ITEMCAT_ARMOR}, {"ArmorUpper", ITEMCAT_ARMOR}, {"ArmorLower", ITEMCAT_ARMOR}, {"Item", ITEMCAT_MATERIAL},
+        {"CapturedActor", ITEMCAT_MATERIAL},
     };
     uint32_t can_get = tag("CanGetPouch"), important = tag("Important"), cooked = tag("CookResult"), rupee = tag("Rupee"),
              arrow = tag("Arrow");
