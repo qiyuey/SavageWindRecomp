@@ -1,0 +1,5 @@
+#!/bin/sh
+if [ -x tools/venv/Scripts/python.exe ]; then
+    exec tools/venv/Scripts/python.exe tools/check_staged_content.py
+fi
+exec python3 tools/check_staged_content.py

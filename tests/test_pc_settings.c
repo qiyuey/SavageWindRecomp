@@ -31,6 +31,12 @@ int main(int argc, char **argv) {
     g_settings.tex_lod_bias = (g_settings.tex_lod_bias + 1) % TEX_LOD_COUNT;
     g_settings.audio_output = (g_settings.audio_output + 1) % AUDIO_OUT_COUNT;
     settings_save();
+    FILE *saved = fopen(argv[1], "r");
+    assert(saved);
+    char line[256];
+    while (fgets(line, sizeof line, saved))
+        assert(!strstr(line, "rumble_strength ="));
+    fclose(saved);
     // Potato: no grass, no lens flare, AMD CAS at 80%; another preset brings grass and the flare back
     graphics_preset_apply(GPRESET_POTATO);
     assert(!g_settings.grass && !g_settings.lens_flare && g_settings.sharpening == 8);

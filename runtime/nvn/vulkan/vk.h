@@ -199,7 +199,9 @@ void vk_hdr_nits(float *peak, float *game, float *ui);
 // highlights, shadows | contrast, saturation, purity_highlights, flare | gamma, 0, 0, 0
 typedef struct { float v[20]; } VkHdrParams;
 void vk_hdr_params(VkHdrParams *p);
-const char *vk_hdr_icc_description(void);  // the startup ICC profile/peak, for the HDR settings description
+#ifdef _WIN32
+const char *vk_hdr_icc_profile(int *peak);  // -1 before discovery, 0 when no profile was found
+#endif
 char *vk_hdr_tonemap_source(const char *orig, int scene_texture, int glow_texture);  // NULL when not ours to replace
 void vk_hdr_record(VkImage win, VkImage src, VkFormat fmt, uint32_t w, uint32_t h);  // src 0: forget win
 bool vk_hdr_source(VkImage win, VkImage *src, VkFormat *fmt, uint32_t *w, uint32_t *h);

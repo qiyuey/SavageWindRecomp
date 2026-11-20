@@ -427,19 +427,26 @@ static std::atomic<unsigned long long> g_done, g_total;
 static std::atomic<float> g_build_frac{-1};  // -1: not building
 static bool g_copy_skipped;                  // (only the game code to build: the bar is all of that)
 static void setup_progress(uint64_t done, uint64_t) { g_done = done; }
+#ifndef _WIN32
 static void build_progress(double f, const char *step) {
     g_build_frac = (float)f;
     static const char *last;
     if (step != last) last = step, set_job(step);
 }
+#endif
 static float extract_progress(void) {
     unsigned long long t = g_total, d = g_done;
+#ifdef _WIN32
+    float f = t ? (float)((double)d / (double)t) : 0;
+#else
     float b = g_build_frac, f = b >= 0 ? (g_copy_skipped ? b : 0.1f + 0.9f * b) : t ? 0.1f * (float)((double)d / (double)t) : 0;
+#endif
     return f < 0 ? 0 : f > 0.99f ? 0.99f : f;
 }
 
 // Why the game code didn't build, from what the builder and the compiler said (runtime/gamebuild.c): what the player
 // can do about it, with the reason itself under it for a bug report.
+#ifndef _WIN32
 static bool said(const std::string &low, std::initializer_list<const char *> words) {
     for (const char *w : words)
         if (low.find(w) != std::string::npos) return true;
@@ -493,6 +500,7 @@ static bool build_game_code(void) {
     }
     return ok;
 }
+#endif
 
 // ------------------------------------------------------------------ shader precompilation (runtime/nvn/precompile.h)
 // After a setup when its option is on (the setup page's PRECOMPILE ALL SHADERS, settings.precompile_shaders), or on
@@ -839,6 +847,12 @@ static void *extract_thread(void *) {
     bool dlc_only = false;  // (the shaders precompiled are the game's: nothing new to precompile)
     bool new_version = post_update_pending(SAVAGEWIND_VERSION);  // (runtime/post_update.h: a release's first start)
     if (src.empty() && check_copied_files(g_root).empty()) {  // copied already (an update needs new game code)
+#ifdef _WIN32
+        if (!new_version && check_game_files(g_root).empty()) {
+            set_job("Game files ready.");
+            goto done;
+        }
+#endif
         g_copy_skipped = true;
         if (new_version) {  // what a wrong copy of the game would only show as a crash later (the RomFS of another version)
             std::string id;
@@ -847,9 +861,11 @@ static void *extract_thread(void *) {
             std::string found = v ? check_romfs(g_root + "/romfs", *v) : "";
             if (!found.empty()) { set_romfs_failure(*v, found); goto done; }
         }
+#ifndef _WIN32
         if (!new_version || !gamelib_present(g_root.c_str())) {  // (the same game code as the last version: nothing to build)
             if (!room_for_build() || !build_game_code()) goto done;
         } else fprintf(stderr, "[launcher] update: the game code is already right for this version\n");
+#endif
         goto check;
     }
     set_job("Looking for the game files...");
@@ -908,7 +924,9 @@ static void *extract_thread(void *) {
                 set_job("Setting up the downloadable content...");
                 if (!setup_dlc(dlc)) { set_failure(FAIL_COPY); goto done; }
             }
+#ifndef _WIN32
             if (!build_game_code()) goto done;
+#endif
             goto check;
         }
         rt_remove_game_files(g_root.c_str());  // (an earlier or interrupted setup's; removes the folder too)
@@ -925,7 +943,9 @@ static void *extract_thread(void *) {
             set_job("Setting up the downloadable content...");
             if (!setup_dlc(dlc)) { set_failure(FAIL_COPY); goto done; }
         }
+#ifndef _WIN32
         if (!build_game_code()) goto done;
+#endif
     }
 check:
     {
@@ -1798,7 +1818,9 @@ extern "C" void launcher_run(const char *root, int mode) {
         pthread_create(&t, NULL, extract_thread, NULL);
         pthread_detach(t);
     }
+#ifndef _WIN32
     if (g_settings.check_updates && !getenv("SAVAGEWIND_NO_UPDATE_CHECK")) update_check_start();
+#endif
     // SAVAGEWIND_LAUNCHER_SHOT=<frame>[:<page>] (test): save build/launcher.png at that frame and exit; page: settings[:<tab>] / askdelete / setup
     long shot_at = getenv("SAVAGEWIND_LAUNCHER_SHOT") ? atol(getenv("SAVAGEWIND_LAUNCHER_SHOT")) : 0, frame = 0;
     if (shot_at) {
@@ -2156,9 +2178,14 @@ extern "C" void launcher_run(const char *root, int mode) {
                                       "needs to be done once and may take a while. Your own files aren't changed.");
                 if (!job.empty())
                     ex_d += std::string("\n\n") + trv(job) + (job_hint.empty() ? "" : std::string(".\n") + trv(job_hint));
+#ifdef _WIN32
+                std::string again_d = tr("Sets the game files up again from the folder chosen above, in place of Savage Wind's "
+                                         "copy. Saves and settings are kept.");
+#else
                 std::string again_d = tr("Sets the game files up again from the folder chosen above, in place of Savage Wind's "
                                          "copy. With no folder chosen, builds the game code again from Savage Wind's copy. "
                                          "Saves and settings are kept.");
+#endif
 
                 // the controller's cursor starts on the first row (not the X), a few frames while the window lays out
                 static int seen_frame = -10, focus_first;  // (not drawn last frame: the window has just opened)
@@ -2408,9 +2435,15 @@ extern "C" void launcher_run(const char *root, int mode) {
                             pthread_detach(st);
                         }
                     }
-                    if (busy || (src.empty() && !check_copied_files(g_root).empty())) opt_disable_next();
-                    if (opt_action("Set up game files", busy ? tr("Working...") : "", ready ? again_d.c_str() : ex_d.c_str(),
-                                   true)) {
+#ifdef _WIN32
+                    const bool setup_ready = ready && src.empty();
+#else
+                    const bool setup_ready = false;
+#endif
+                    if (busy || setup_ready || (src.empty() && !check_copied_files(g_root).empty())) opt_disable_next();
+                    const char *setup_value = busy ? tr("Working...") : setup_ready ? tr("Ready") : "";
+                    const char *setup_desc = setup_ready ? tr("Game files ready.") : ready ? again_d.c_str() : ex_d.c_str();
+                    if (opt_action("Set up game files", setup_value, setup_desc, true)) {
                         settings_save();  // (the colour look as chosen above)
                         g_file_size.set_suspended(true);
                         pthread_mutex_lock(&g_lock);

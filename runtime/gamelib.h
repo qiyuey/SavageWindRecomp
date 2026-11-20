@@ -10,7 +10,7 @@
 
 #if defined(_WIN32)
 #define GAMELIB_NAME "swgame.dll"
-#define GAMELIB_EXPORT __declspec(dllexport)
+#define GAMELIB_EXPORT
 #elif defined(__APPLE__)
 #define GAMELIB_NAME "swgame.dylib"
 #define GAMELIB_EXPORT __attribute__((visibility("default")))

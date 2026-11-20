@@ -29,6 +29,7 @@
 #include <SDL3/SDL.h>
 
 #include "i18n.h"
+#include "menu.h"
 #include "binding_row_layout.h"
 
 extern "C" {
@@ -52,7 +53,6 @@ void menu_request_window_apply(void);       // menu.mm (fullscreen / window size
 void menu_size_list_open(void);             // menu.mm (Window size's list, over the screen)
 bool menu_size_list_up(void);
 bool renderer_gpu_rtx(void);                // vulkan/device.c, metal.m
-const char *vk_hdr_icc_description(void);   // runtime/nvn/vulkan/device.c
 bool vk_feedback_once(void);                // runtime/nvn/vulkan/exec.c (Scene copies; Vulkan only)
 }
 
@@ -82,7 +82,9 @@ const int GAME_ENTRIES = 14;
 // 13 DisplaySpecialMode (Toy-Con VR Goggles)
 const uint32_t GAME_CAMERA_Y = 1, GAME_CAMERA_X = 2, GAME_GYRO = 4, GAME_CAMERA_SENSITIVITY = 7, GAME_AMIIBO = 9,
                GAME_VOICE_BUTTON = 11, GAME_VOICE_LEVEL = 12, GAME_VR = 13;
-const uint32_t MSG_BASE = 9000;  // this file's message ids: MSG_BASE + item * 256 + part (the game's are 0000-0100)
+const uint32_t MSG_BASE = 9000;  // the game's message ids are 0000-0100
+// Each row needs room for its labels and every value, including the 993 HDR peak levels.
+const uint32_t MSG_STRIDE = 1024;
 enum { MSG_TITLE = 0, MSG_DESC = 1, MSG_BUTTON = 2, MSG_KEY = 3, MSG_PAD = 4, MSG_VALUE = 16 };
 enum { MSG_TITLE_QUIT = 1, MSG_QUIT_QUESTION, MSG_QUIT_DESKTOP, MSG_QUIT_START };  // (storage ids below MSG_BASE)
 
@@ -233,9 +235,6 @@ static_assert(k_menu_speed[MENU_SPEED_DEFAULT_INDEX] == 100);
 constexpr int k_deadzone[] = {0, 3, 5, 8, 10, 12, 15, 20, 25, 30, 40};  // stick dead zone, % of full tilt
 constexpr int DEADZONE_DEFAULT = 4;
 static_assert(k_deadzone[DEADZONE_DEFAULT] == (int)(STICK_DEADZONE_DEFAULT * 100 + 0.5f));
-constexpr int k_rumble_strength[] = {10, 20, 30, 40, 50, 60, 70, 80, 90, 100};  // vibration strength %
-constexpr int RUMBLE_STRENGTH_DEFAULT_INDEX = 9;
-static_assert(k_rumble_strength[RUMBLE_STRENGTH_DEFAULT_INDEX] == 100);
 const char *const k_invert[] = {"Off", "Up and down", "Left and right", "Both"};  // (MOTION_INVERT_* bits)
 constexpr int k_motion_sens_y[] = MOTION_SENS_Y_CHOICES;  // vertical motion aiming, % of the motion sensitivity
 constexpr int MOTION_SENS_Y_DEFAULT = 5;
@@ -551,16 +550,11 @@ void build_items(void) {
                        [](const Item &, int x) { return x ? tr("RenoDX (PsychoV)") : tr("Vanilla"); },
                        [](const Item &) { return g_settings.hdr_tonemapper == 0 ? 0 : 1; },
                        [](const Item &, int x) { g_settings.hdr_tonemapper = x ? 1 : 0; }, 1));
-    static std::string hdr_peak_desc;
-    hdr_peak_desc = "The brightest your display can show. The scene, flashes, particles, HUD and menus are capped "
-                    "to it. ";
-    hdr_peak_desc += vk_hdr_icc_description();
-    hdr_peak_desc += " Moves in 10-nit steps.";
-    v.push_back(choice(P_HDR, "HDR peak brightness", hdr_peak_desc.c_str(),
+    v.push_back(choice(P_HDR, "HDR peak brightness", nullptr,
                        [](const Item &) { return 993; },  // 80..10000, step 10
                        [](const Item &, int x) {
                            static char buf[32];
-                           snprintf(buf, sizeof buf, "%d nits", 80 + x * 10);
+                           snprintf(buf, sizeof buf, tr("%d nits"), 80 + x * 10);
                            return (const char *)buf;
                        },
                        [](const Item &) {
@@ -570,13 +564,14 @@ void build_items(void) {
                            return (v - 80) / 10;
                        },
                        [](const Item &, int x) { g_settings.hdr_peak_nits = 80 + x * 10; hdr_look_init_peak(); }, 92));
+    v.back().desc_fn = [](const Item &) { return hdr_peak_description(); };
     v.push_back(choice(P_HDR, "HDR game brightness",
                        "How bright the 3D scene's normal white is. 203 nits is the standard HDR white; higher makes "
                        "the scene brighter against the HUD, up to the peak.",
                        [](const Item &) { return 921; },
                        [](const Item &, int x) {
                            static char buf[32];
-                           snprintf(buf, sizeof buf, "%d nits", x + 80);
+                           snprintf(buf, sizeof buf, tr("%d nits"), x + 80);
                            return (const char *)buf;
                        },
                        [](const Item &) {
@@ -589,7 +584,7 @@ void build_items(void) {
                        [](const Item &) { return 921; },
                        [](const Item &, int x) {
                            static char buf[32];
-                           snprintf(buf, sizeof buf, "%d nits", x + 80);
+                           snprintf(buf, sizeof buf, tr("%d nits"), x + 80);
                            return (const char *)buf;
                        },
                        [](const Item &) {
@@ -1121,18 +1116,6 @@ void build_items(void) {
     v.push_back(toggle(P_CONTROLS, "Controller rumble", "Vibrate the controller during play.",
                        [](const Item &) { return (int)g_settings.rumble; },
                        [](const Item &, int x) { g_settings.rumble = x; }, 1));
-    Item it_rumble = choice(P_CONTROLS, "Rumble strength", "100% is the game's own.",
-                            [](const Item &) { return N(k_rumble_strength); },
-                            [](const Item &, int x) {
-                                static std::string str;
-                                str = pct(k_rumble_strength[x]);
-                                return str.c_str();
-                            },
-                            [](const Item &) { return nearest(k_rumble_strength, N(k_rumble_strength), (float)g_settings.rumble_strength); },
-                            [](const Item &, int x) { g_settings.rumble_strength = k_rumble_strength[x]; },
-                            RUMBLE_STRENGTH_DEFAULT_INDEX);
-    it_rumble.value_off = [](const Item &, int) { return !g_settings.rumble; };
-    v.push_back(it_rumble);
     v.push_back(toggle(P_CONTROLS, "Free camera with both sticks",
                        "Clicking both sticks together turns the free camera on and off. Home on the keyboard always does. "
                        "While it's on: F8 or d-pad up changes the filter, [ and ] or d-pad left and right the hour, F7 or "
@@ -1446,7 +1429,7 @@ bool install(void) {
     for (size_t i = 0; i < g_items.size(); i++) g_names.push_back("sw_option_" + std::to_string(i));
     for (size_t i = 0; i < g_items.size(); i++) {
         const Item &it = g_items[i];
-        uint32_t m = MSG_BASE + (uint32_t)i * 256;
+        uint32_t m = MSG_BASE + (uint32_t)i * MSG_STRIDE;
         Entry e = {};
         e.name_vtbl = g_entries[0].name_vtbl;
         e.name = (uint64_t)(uintptr_t)g_names[i].c_str();
@@ -2035,7 +2018,7 @@ extern "C" int rt_opt_two_redraw(uint64_t row) {
         if (it && it->action == A_RESET_BINDS) wide_button(row);
     }
     if (!two_configure(row)) return 0;
-    uint32_t msg = MSG_BASE + (rd32(row + 0x50) - GAME_ENTRIES) * 256;
+    uint32_t msg = MSG_BASE + (rd32(row + 0x50) - GAME_ENTRIES) * MSG_STRIDE;
     for (int col = 0; col < 2; col++) {
         uint64_t layout = rd64(rd64(row + (col ? 0x28 : 0x20)) + 0x20);
         two_text(layout, "T_Text_00", msg + (col ? MSG_PAD : MSG_KEY));
@@ -2188,7 +2171,7 @@ extern "C" int rt_opt_reset(uint64_t row) {
 // Message w21 into out ({char16_t *, u32 length with the terminator}); 0: the game's own message
 extern "C" int rt_opt_msg(uint32_t id, uint64_t out) {
     if (id < MSG_BASE || !g_installed) return 0;
-    uint32_t i = (id - MSG_BASE) / 256, part = (id - MSG_BASE) % 256;
+    uint32_t i = (id - MSG_BASE) / MSG_STRIDE, part = (id - MSG_BASE) % MSG_STRIDE;
     const Item *it = item_of_index(GAME_ENTRIES + i);
     if (!it) return 0;
     const char *s = "";

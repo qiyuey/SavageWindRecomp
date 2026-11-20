@@ -17,6 +17,7 @@
 #ifdef _WIN32
 #include <direct.h>  // _mkdir
 #include <stdlib.h>  // _putenv_s
+#define WIN32_LEAN_AND_MEAN  // Match the runtime build and avoid shellapi.h's PO_* macros.
 #include <windows.h>
 #endif
 #include <chrono>

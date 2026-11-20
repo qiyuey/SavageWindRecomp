@@ -29,7 +29,6 @@ Settings g_settings = {
     .mute_unfocused = false,
     .shrine_sensor_volume = 100,
     .rumble = true,
-    .rumble_strength = RUMBLE_STRENGTH_DEFAULT,
     .freecam_sticks = true,
     .damage_taken = 100,
     .damage_dealt = 100,
@@ -445,7 +444,6 @@ void settings_load(void) {
             g_settings.sharpening = p < 0 ? 0 : p > 100 ? 10 : (p + 5) / 10;
         }
         else if (!strcmp(key, "rumble")) g_settings.rumble = atoi(val) != 0;
-        else if (!strcmp(key, "rumble_strength")) g_settings.rumble_strength = atoi(val);
         else if (!strcmp(key, "freecam_sticks")) g_settings.freecam_sticks = atoi(val) != 0;
         else if (!strcmp(key, "quick_replace")) g_settings.quick_replace = atoi(val) != 0;
         else if (!strcmp(key, "quick_drop")) g_settings.quick_drop = atoi(val) != 0;
@@ -751,7 +749,6 @@ void settings_load(void) {
     g_settings.stick_cam_x = CLAMP(g_settings.stick_cam_x, STICK_CAM_MIN, STICK_CAM_MAX);
     g_settings.stick_cam_y = CLAMP(g_settings.stick_cam_y, STICK_CAM_MIN, STICK_CAM_MAX);
     g_settings.menu_text_size = CLAMP(g_settings.menu_text_size, 80, 150);
-    g_settings.rumble_strength = CLAMP(g_settings.rumble_strength, RUMBLE_STRENGTH_MIN, RUMBLE_STRENGTH_MAX);
     g_settings.weapon_wear = CLAMP(g_settings.weapon_wear, WEAPON_WEAR_MIN, WEAPON_WEAR_MAX);
     if (g_settings.no_weapon_wear) g_settings.weapon_wear = 0;  // (Unbreakable weapons is Weapon wear's Fairy, 0x)
     if (g_settings.item_multiplier != 2 && g_settings.item_multiplier != 4 && g_settings.item_multiplier != 8)
@@ -823,7 +820,6 @@ bool settings_save_to(const char *path) {
     fprintf(f, "sharpening = %d\n", g_settings.sharpening * 10);
     fprintf(f, "frame_generation = %d\n", g_settings.frame_gen ? 1 : 0);
     fprintf(f, "rumble = %d\n", g_settings.rumble);
-    fprintf(f, "rumble_strength = %d\n", g_settings.rumble_strength);
     fprintf(f, "freecam_sticks = %d\n", g_settings.freecam_sticks);
     fprintf(f, "quick_replace = %d\n", g_settings.quick_replace);
     fprintf(f, "quick_drop = %d\n", g_settings.quick_drop);

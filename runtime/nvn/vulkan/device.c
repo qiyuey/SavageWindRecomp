@@ -35,6 +35,7 @@
 #include "xess.h"
 #include "../output_scale.h"
 #include "../renderer.h"
+#include "../../vibration.h"
 #include "dlss.h"
 
 // SAVAGEWIND_VK_API12=1: the driver used as a Vulkan 1.2 one (api12_usable below)
@@ -1690,22 +1691,15 @@ static VkDescriptorSet hdr_sets[8];
 static char g_hdr_icc_profile[256];
 static int g_hdr_icc_peak;
 static atomic_int g_hdr_icc_done;
-#endif
-const char *vk_hdr_icc_description(void) {
-#ifdef _WIN32
-    static char desc[512];
-    if (!atomic_load_explicit(&g_hdr_icc_done, memory_order_acquire))
-        return "Windows HDR calibration profile: not read yet.";
-    if (g_hdr_icc_peak >= 80 && g_hdr_icc_profile[0])
-        snprintf(desc, sizeof desc, "Windows HDR calibration profile: %s, %d nits.", g_hdr_icc_profile,
-                 g_hdr_icc_peak);
-    else
-        snprintf(desc, sizeof desc, "No Windows HDR calibration profile found; peak defaults to 1000 nits.");
-    return desc;
-#else
-    return "No Windows HDR calibration profile on this platform; set the peak manually.";
-#endif
+const char *vk_hdr_icc_profile(int *peak) {
+    if (!atomic_load_explicit(&g_hdr_icc_done, memory_order_acquire)) {
+        *peak = -1;
+        return NULL;
+    }
+    *peak = g_hdr_icc_peak;
+    return *peak >= 80 ? g_hdr_icc_profile : NULL;
 }
+#endif
 
 // Video > HDR as it stands now: whether the swapchain should be HDR10, and SDR white's nits
 static bool hdr_wanted(float *white) {
@@ -1737,7 +1731,7 @@ static bool hdr_wanted(float *white) {
         int peak = plat_hdr_peak_nits(hwnd, profile, sizeof profile);
         if (peak >= 80) {
             g_hdr_icc_peak = peak;
-            snprintf(g_hdr_icc_profile, sizeof g_hdr_icc_profile, "%s", profile[0] ? profile : "unknown");
+            snprintf(g_hdr_icc_profile, sizeof g_hdr_icc_profile, "%s", profile);
             LOG("[hdr] Windows HDR calibration profile: \"%s\", %d nits\n", g_hdr_icc_profile, peak);
         } else {
             LOG("[hdr] no Windows HDR calibration profile found\n");
@@ -2412,6 +2406,8 @@ static bool present_image(uint32_t img, VkSemaphore sem, int kind, uint64_t seq)
 static VkSemaphore acquire_sem[FRAMES], done_sem[8];
 static uint64_t slot_seq[FRAMES];
 static int slot;
+static VkCommandPool overlay_pool[FRAMES];
+static VkCommandBuffer overlay_cmd[FRAMES];
 
 static VkSemaphore binary_semaphore(void) {
     VkSemaphoreCreateInfo si = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
@@ -2663,7 +2659,7 @@ static void hdr_game_write(VkCommandBuffer cb, uint32_t i, bool menu) {
 }
 
 uint64_t g_present_split[6];  // (VK_PROF) acquire, end pass, draw + menu, submit, present, slot wait
-typedef struct { uint32_t image; VkSemaphore acquired; bool ok; bool hdr_game, menu; } Frame;
+typedef struct { uint32_t image; VkSemaphore acquired; bool ok; bool hdr_game, menu, overlay_recorded, overlay_pass; } Frame;
 static Frame cur_frame;
 // macOS gives a window it has covered completely (another app in front of a fullscreen one, another Space) no more
 // drawables: MoltenVK's first submission drawing into the next one waited its full second for it, a 1 s freeze each
@@ -2742,6 +2738,8 @@ static bool frame_begin(const float clear[4], bool hdr_game) {
         return false;
     }
     cur_frame.acquired = acquire_sem[slot];
+    cur_frame.overlay_recorded = false;
+    cur_frame.overlay_pass = false;
     cur_frame.hdr_game = hdr_game && g_hdr && cur_frame.image < hdr_game_count;
     slot_seq[slot] = vk_pending_seq();
     VkCommandBuffer cb = vk_cmd();
@@ -2775,8 +2773,10 @@ void vk_frame_suspend(void) {
 }
 void vk_frame_resume(void) {
     if (!cur_frame.ok) return;
+    cur_frame.overlay_pass = false;
     VkCommandBuffer cb = vk_cmd();
-    VkRenderingAttachmentInfo ca = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = frame_view(),
+    VkImageView view = cur_frame.menu ? g_vk.sc_views[cur_frame.image] : frame_view();
+    VkRenderingAttachmentInfo ca = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = view,
                                     .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                                     .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD, .storeOp = VK_ATTACHMENT_STORE_OP_STORE};
     VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, g_vk.sc_extent}, .layerCount = 1,
@@ -2813,6 +2813,65 @@ static void frame_menu_begin(VkCommandBuffer cb) {
 }
 
 VkExtent2D vk_frame_extent(void) { return g_vk.sc_extent; }
+// Based on LASRecomp 85b6325. Only the presenting thread records into these pools.
+// vk_frame_begin waits for the slot's last submission before a pool can be reset.
+void *vk_overlay_begin(void *primary) {
+    if (cur_frame.ok && cur_frame.hdr_game && !cur_frame.menu)
+        frame_menu_begin((VkCommandBuffer)primary);
+    if (!rec_on() || !cur_frame.ok || cur_frame.overlay_recorded) {
+        if (cur_frame.ok && cur_frame.overlay_pass) {
+            vk_frame_suspend();
+            vk_full_barrier((VkCommandBuffer)primary);
+            vk_frame_resume();
+        }
+        rec_drain();
+        return primary;
+    }
+    if (!overlay_pool[slot]) {
+        VkCommandPoolCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+                                     .flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT, .queueFamilyIndex = g_vk.qfam};
+        VK_CHECK(vkCreateCommandPool(g_vk.dev, &pi, NULL, &overlay_pool[slot]));
+        VkCommandBufferAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+                                          .commandPool = overlay_pool[slot], .level = VK_COMMAND_BUFFER_LEVEL_SECONDARY,
+                                          .commandBufferCount = 1};
+        VK_CHECK(vkAllocateCommandBuffers(g_vk.dev, &ai, &overlay_cmd[slot]));
+        LOG("[vk] ImGui overlay: secondary command buffers\n");
+    } else {
+        VK_CHECK(vkResetCommandPool(g_vk.dev, overlay_pool[slot], 0));
+    }
+    VkCommandBufferInheritanceRenderingInfo ir = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_RENDERING_INFO,
+                                                    .colorAttachmentCount = 1, .pColorAttachmentFormats = &g_vk.sc_format,
+                                                    .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT};
+    VkCommandBufferInheritanceInfo ii = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO, .pNext = &ir};
+    VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                                   .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT | VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT,
+                                   .pInheritanceInfo = &ii};
+    VK_CHECK(vkBeginCommandBuffer(overlay_cmd[slot], &bi));
+    return (void *)overlay_cmd[slot];
+}
+
+void vk_overlay_end(void *primary, void *overlay) {
+    if (primary == overlay) return;
+    VkCommandBuffer cb = (VkCommandBuffer)primary, secondary = (VkCommandBuffer)overlay;
+    VK_CHECK(vkEndCommandBuffer(secondary));
+    rec_CmdEndRendering(cb);
+    // The overlay loads and blends over the image written by the window pass.
+    image_barrier(cb, g_vk.sc_images[cur_frame.image], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                  VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    VkRenderingAttachmentInfo ca = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+                                    .imageView = g_vk.sc_views[cur_frame.image],
+                                    .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                    .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD, .storeOp = VK_ATTACHMENT_STORE_OP_STORE};
+    VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+                          .flags = VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT,
+                          .renderArea = {{0, 0}, g_vk.sc_extent}, .layerCount = 1,
+                          .colorAttachmentCount = 1, .pColorAttachments = &ca};
+    rec_CmdBeginRendering(cb, &ri);
+    rec_execute_secondary(cb, secondary);
+    cur_frame.overlay_recorded = true;
+    cur_frame.overlay_pass = true;
+}
+
 void *vk_frame_cmd(void) {  // (the start screen's ImGui records into it itself: what was queued before goes first)
     VkCommandBuffer cb = vk_cmd();
     rec_drain();
@@ -2861,6 +2920,7 @@ void vk_frame_end(const char *shot_path) {
     uint32_t img = cur_frame.image;
     if (!done_sem[img]) done_sem[img] = binary_semaphore();
     uint64_t seq = vk_pending_seq();
+    slot_seq[slot] = seq;
     uint64_t ts = SDL_GetTicksNS();
     { SW_ZONE("present/submit"); vk_submit_extra(cur_frame.acquired, done_sem[img], VK_NULL_HANDLE); }
     g_present_split[3] += SDL_GetTicksNS() - ts;
@@ -3256,7 +3316,6 @@ static void present_locked(NvnTexture *t) {
         uint64_t td = SDL_GetTicksNS();
         if (gen) {  // the generated frame, as the game's are (crop, anti-aliasing, menu), then this one half a frame later
             vk_present_draw(cb, gen, (float)vx, (float)vy, (float)vw, (float)vh, pv);
-            if (menu_render_needed()) rec_drain();  // (ImGui records into cb itself, and may upload its fonts on the queue)
             menu_render((void *)cb, g_vk.sc_extent.width, g_vk.sc_extent.height);
             // SAVAGEWIND_FG_SHOT_AT=<frame>,... (counted as SAVAGEWIND_SHOT_AT): the window at two presents in a row
             // from there, each generated frame and the game's after it -> build/frames/window_N_<0|1>_<gen|real>.png
@@ -3294,12 +3353,7 @@ static void present_locked(NvnTexture *t) {
         static long menu_at = -1;
         if (menu_at < 0) menu_at = getenv("SAVAGEWIND_MENU_AT") ? atol(getenv("SAVAGEWIND_MENU_AT")) : 0;
         if (menu_at && (long)total_frames + 1 == menu_at) { extern void menu_test_open(void); menu_test_open(); }
-        bool menu = menu_render_needed();
-        if (menu) {
-            rec_drain();  // (ImGui records into cb itself, and may upload its fonts on the queue)
-            if (hdr_src) frame_menu_begin(cb);  // (the float picture is not the menu's target)
-            { SW_ZONE("present/menu"); menu_render((void *)cb, g_vk.sc_extent.width, g_vk.sc_extent.height); }
-        }
+        { SW_ZONE("present/menu"); menu_render((void *)cb, g_vk.sc_extent.width, g_vk.sc_extent.height); }
         g_present_split[2] += SDL_GetTicksNS() - td;
         static long win_shot = -1;
         if (win_shot < 0) win_shot = getenv("SAVAGEWIND_WINDOW_SHOT") ? atol(getenv("SAVAGEWIND_WINDOW_SHOT")) : 0;
@@ -3321,7 +3375,7 @@ static void present_locked(NvnTexture *t) {
         }
         vk_frame_end(shot ? "build/window.png" : wpath[0] ? wpath : fg_real_shot[0] ? fg_real_shot : NULL);
         fg_real_shot[0] = 0;
-        if (shot && getenv("SAVAGEWIND_EXIT_AFTER_SHOT")) { fflush(stderr); _exit(0); }
+        if (shot && getenv("SAVAGEWIND_EXIT_AFTER_SHOT")) { input_shutdown(); fflush(stderr); _exit(0); }
     } else {
         renderer_submit();
     }
@@ -3354,6 +3408,7 @@ presented:
         static long exit_at = -1;
         if (exit_at < 0) exit_at = getenv("SAVAGEWIND_EXIT_AT") ? atol(getenv("SAVAGEWIND_EXIT_AT")) : 0;
         if (exit_at && (long)script_frame >= exit_at) {
+            input_shutdown();
 #ifdef SW_PGO_GENERATE
             // The scripted exit skips atexit, so finish the runtime training profile explicitly.
             write_runtime_profile();
@@ -3529,7 +3584,7 @@ presented:
                  (unsigned long long)total_frames);
         renderer_save_texture_tex(b, path);
         // a series (SCREENSHOT_FROM) runs on until SAVAGEWIND_WINDOW_SHOT exits
-        if (getenv("SAVAGEWIND_EXIT_AFTER_SHOT") && !shot_from) { fflush(stderr); _exit(0); }
+        if (getenv("SAVAGEWIND_EXIT_AFTER_SHOT") && !shot_from) { input_shutdown(); fflush(stderr); _exit(0); }
     }
     double now = SDL_GetTicks() / 1000.0;
     static double fps_iv = -1, prev_present, max_gap;
@@ -3570,6 +3625,7 @@ void vk_shaders_init(void);
 // exit() from any thread: let the GPU finish, keep the pipeline cache, then end the process without the DLL
 // teardown (driver / validation-layer threads can stall it for minutes while the game's threads still run).
 static void quick_exit_handler(void) {
+    vibration_exit();
     static int trace = -1;
     if (trace < 0) trace = getenv("SAVAGEWIND_VK_TRACE") != NULL;
     if (trace) LOG("[vk] exit: waiting for the GPU\n");

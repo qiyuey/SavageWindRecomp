@@ -15,6 +15,7 @@ static unsigned focused_kind, focus_count, help_count;
 static uint64_t focused_row;
 const char *tr(const char *s) { return s; }
 std::string ui_visual_order(const char *s) { return s; }  // (i18n.mm: right-to-left reordering, not under test)
+const char *hdr_peak_description(void) { abort(); }
 extern "C" {
 // Reached by live Options code (window size rows), never called by this routing test.
 bool gamelib_compat(void) { return false; }
@@ -30,10 +31,15 @@ const char *const g_gpreset_names[GPRESET_COUNT] = {"Potato", "Original", "High"
 const char *problem_report_make(void) { abort(); }
 void menu_request_window_apply(void) { abort(); }
 void winsize_name(WinSize, const char *, char *, int) { abort(); }
+void hdr_look_store(int) { abort(); }
 // PE resolves unused UI references before discarding their sections. These unrelated
 // services must never be called by this routing test, on either test platform.
 #ifdef _WIN32
 int color_lut_list(void) { abort(); }
+void hdr_look_init_peak(void) { abort(); }
+int hdr_look_current(void) { abort(); }
+void hdr_look_apply(int) { abort(); }
+void motion_status(MotionStatus *) { abort(); }
 void pc_cursor_options_page_changed(void) { abort(); }
 void pc_cursor_options_tick(uint64_t) { abort(); }
 bool upscaler_available(int) { abort(); }
@@ -236,5 +242,20 @@ int main() {
     wr32(screen + 0x36c0, 0); rt_opt_decide(ordinary);
     assert(bind_capture_active(&dev, &slot, &ms) && dev == BIND_DEV_ANY);
     bind_capture_cancel();
+    // Long HDR value ranges must not resolve as text from the next row.
+    uint32_t hdr_msg = MSG_BASE + (uint32_t)g_items.size() * MSG_STRIDE;
+    g_items.push_back(choice(P_HDR, "HDR UI brightness", "",
+                             [](const Item &) { return 921; },
+                             [](const Item &, int x) { return x == 320 ? "400 nits" : "1000 nits"; },
+                             nullptr, nullptr, 123));
+    g_items.push_back(button(P_HDR, "Next option", "", "", A_PAGE, P_HDR));
+    for (const auto &[id, expected] : {
+             std::pair<uint32_t, const char16_t *>{hdr_msg + MSG_VALUE + 320, u"400 nits"},
+             {hdr_msg + MSG_VALUE + 920, u"1000 nits"},
+             {hdr_msg + MSG_STRIDE + MSG_TITLE, u"Next option"},
+         }) {
+        assert(rt_opt_msg(id, msg_out));
+        assert(std::u16string((const char16_t *)(uintptr_t)rd64(msg_out)) == expected);
+    }
     puts("PASS: real Options hooks and capture engine, separate devices, navigation, mouse, CPU preservation, fallback");
 }

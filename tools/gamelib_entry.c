@@ -10,10 +10,12 @@ extern const GameLibSite game_sites[];
 extern const uint32_t game_site_count;
 
 // simd.h: the compatible target's fma mode, set by the runtime through the tables (exact until then)
-#ifndef _WIN32
+#ifdef _WIN32
+extern int simd_fma_unfused;
+#else
 __attribute__((visibility("hidden")))
-#endif
 int simd_fma_unfused;
+#endif
 
 GAMELIB_EXPORT const GameLibTables *swgame_tables(void) {
     static const GameLibTables t = {GAMELIB_ABI, GAMELIB_ID, game_modules, &game_module_count,

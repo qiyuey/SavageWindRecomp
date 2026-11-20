@@ -30,6 +30,8 @@ endif
 # B: build dir. MACOS_MIN: oldest macOS to run on (default: this one). DEPS: prefix with SDL3 / FFmpeg instead of
 # Homebrew's (make deps). `make app` sets all three (build/mac15, 15.0, build/deps); plain `make` uses none.
 B         ?= build
+LTO       ?= $(if $(filter windows,$(PLATFORM)),thin)
+THINLTO   := $(if $(filter thin,$(LTO)),-flto=thin)
 ifeq ($(PLATFORM),macos)
 RENDERER  ?= vulkan
 ifneq ($(filter-out metal vulkan,$(RENDERER)),)
@@ -45,7 +47,8 @@ MINFLAG  := $(if $(MACOS_MIN),-mmacosx-version-min=$(MACOS_MIN))
 CC       := clang $(MINFLAG) $(CROSS)
 CXX      := clang++ $(MINFLAG) $(CROSS)
 IMGUI    := third_party/imgui
-GENFLAGS := -O1 -fno-strict-aliasing -Wno-return-type -Wno-unused-label -fvisibility=hidden -Iruntime
+GAME_OPT ?= $(if $(filter windows,$(PLATFORM)),-O2,-O1)
+GENFLAGS := $(GAME_OPT) -fno-strict-aliasing -Wno-return-type -Wno-unused-label -fvisibility=hidden -Iruntime
 # RECOMP_LOCALS=1 (the default since Alpha 5): the generator keeps each function's most used registers and its flags in
 # C locals (gen.py --locals, docs/RECOMP-LOCALS.md); RECOMP_LOCALS=0 builds the plain game code. It is part of
 # GAMELIB_ID, so a library built one way is never loaded for the other.
@@ -53,7 +56,7 @@ RECOMP_LOCALS ?= 1
 GENLOCALS := $(if $(filter 1,$(RECOMP_LOCALS)),--locals)
 # The start screen's zig cc reads -O1 as its own "fast" mode (clang -O2 with the loop and SLP vectorizers) and adds
 # debug info and frame pointers: these give it what clang -O1 builds here, in a third less time (runtime/gamebuild.c)
-GENFLAGS_ZIG := -Xclang $(filter -O%,$(GENFLAGS)) -fno-vectorize -fno-slp-vectorize -g0 -fomit-frame-pointer
+GENFLAGS_ZIG := -Xclang $(GAME_OPT) $(if $(filter -O1,$(GAME_OPT)),-fno-vectorize -fno-slp-vectorize) -g0 -fomit-frame-pointer
 
 # The game code (made by `make gen` from your own game files) is its own library next to the app (runtime/gamelib.h);
 # the app itself holds none of it. $(GEN)/layout.c, then a folder per module (main, subsdk*, sdk)
@@ -100,7 +103,7 @@ GAMELIB_LDFLAGS := -dynamiclib -undefined dynamic_lookup  # (the runtime functio
 GAMELIB_SHARED := -shared -Wl,-undefined,dynamic_lookup  # (the same, for the start screen's build: zig cc)
 else ifeq ($(PLATFORM),linux)
 EXE      := $(B)/savagewind
-DEPINC   := $(if $(DEPS),-I$(DEPS)/include,$(shell pkg-config --cflags libavformat 2>/dev/null))  # (openSUSE has them in /usr/include/ffmpeg)
+DEPINC   := $(if $(SDL3_ROOT),-I$(SDL3_ROOT)/include) $(if $(DEPS),-I$(DEPS)/include,$(shell pkg-config --cflags libavformat 2>/dev/null))  # (openSUSE has them in /usr/include/ffmpeg)
 ifeq ($(ARCH),x86_64)
 GENARCH  ?= -march=x86-64-v3  # as on Windows: AVX2 + FMA for the lifted FP/SIMD code (checked at startup)
 GENARCH_COMPAT ?= -march=x86-64-v2  # CPUs without them (GAMELIB_ID_COMPAT below)
@@ -119,7 +122,7 @@ SHADERC  ?= $(if $(DEPS),-lshaderc_shared,$(or $(shell pkg-config --libs shaderc
              $(shell echo '$(SHADERC_TEST)' | $(CC) -x c - -lshaderc_shared -o /dev/null 2>/dev/null && echo -lshaderc_shared),\
              $(shell echo '$(SHADERC_TEST)' | $(CC) -x c - -lshaderc -o /dev/null 2>/dev/null && echo -lshaderc),-lshaderc))
 # -rdynamic: crash backtraces name host functions (runtime/platform/linux.c)
-LDFLAGS  := -fuse-ld=lld -rdynamic $(if $(DEPS),-L$(DEPS)/lib) -lSDL3 -lavformat -lavcodec -lavutil -lswscale \
+LDFLAGS  := -fuse-ld=lld -rdynamic $(if $(SDL3_ROOT),-L$(SDL3_ROOT)/lib) $(if $(DEPS),-L$(DEPS)/lib) -lSDL3 -lavformat -lavcodec -lavutil -lswscale \
             -lvulkan $(SHADERC) -lz -lpthread -ldl -lm
 BACKEND_SRC := $(wildcard runtime/nvn/vulkan/*.c) $(wildcard runtime/nvn/vulkan/*.cpp)
 BACKEND_OBJ := $(patsubst runtime/%.cpp,$(B)/rt/%.o,$(patsubst runtime/%.c,$(B)/rt/%.o,$(BACKEND_SRC)))
@@ -130,27 +133,47 @@ GAMELIB_LDFLAGS := -shared -fuse-ld=lld  # (the runtime functions it calls: the 
 GAMELIB_SHARED := -shared
 else
 EXE      := $(B)/savagewind.exe
-DEPINC   := $(if $(DEPS),-I$(DEPS)/include)
+ifeq ($(filter-out undefined,$(origin SDL3_ROOT) $(origin SDL3_LIBDIR) $(origin SDL3_LIB) $(origin SDL3_DLL)),)
+SDL3_AUTO := $(wildcard ../SDL3/CMakeLists.txt)
+endif
+SDL3_ROOT ?= ../SDL3
+ifneq ($(SDL3_AUTO),)
+SDL3_LOCAL := $(abspath $(SDL3_ROOT))/build/savagewind-ucrt64
+SDL3_LIBDIR ?= $(SDL3_LOCAL)/install/bin
+SDL3_LIB ?= $(SDL3_LOCAL)/install/lib/libSDL3.dll.a
+endif
+SDL3_LIBDIR ?= $(SDL3_ROOT)/build/windows-x64-release/Release
+SDL3_LIB ?= $(SDL3_LIBDIR)/SDL3.lib
+SDL3_DLL ?= $(SDL3_LIBDIR)/SDL3.dll
+SDL3_USB_DLL ?= $(shell command -v libusb-1.0.dll 2>/dev/null)
+RELEASE  ?= 1
+WIN_SUBSYSTEM := $(if $(filter-out 0,$(RELEASE)),windows,console)
+# Relink the executable when switching between GUI and console builds in the same directory.
+WIN_SUBSYSTEM_STAMP := $(B)/windows_subsystem
+$(shell mkdir -p $(B) && [ "$$(cat $(WIN_SUBSYSTEM_STAMP) 2>/dev/null)" = '$(WIN_SUBSYSTEM)' ] || echo '$(WIN_SUBSYSTEM)' > $(WIN_SUBSYSTEM_STAMP))
+DEPINC   := -I$(SDL3_ROOT)/include $(if $(DEPS),-I$(DEPS)/include)
 OSFLAGS  := -D_FILE_OFFSET_BITS=64 -D_POSIX_THREAD_SAFE_FUNCTIONS -D_CRT_RAND_S -DWIN32_LEAN_AND_MEAN -DNOMINMAX
-GENARCH  ?= -march=x86-64-v3  # AVX2 + FMA for the lifted FP/SIMD code (simd.h)
-GENARCH_COMPAT ?= -march=x86-64-v2  # CPUs without them (GAMELIB_ID_COMPAT below)
+# This fork's Windows build targets the local Ryzen 9 7950X (Zen 4).
+GENARCH  ?= -march=znver4
+GENARCH_COMPAT :=
+RUNTIME_ARCH ?= $(GENARCH)
 GENFLAGS += -D_FILE_OFFSET_BITS=64 $(GENARCH)
 # --stack: every thread's default stack, reserved (committed as it grows): 256 MB, the guest threads' recursion runs on
 # it (runtime/kernel.c thread_start)
-LDFLAGS  := -fuse-ld=lld -Wl,--stack,268435456 $(if $(DEPS),-L$(DEPS)/lib) -lSDL3 -lavformat -lavcodec -lavutil -lswscale \
+LDFLAGS  := -fuse-ld=lld -Wl,--stack,268435456 $(if $(DEPS),-L$(DEPS)/lib) $(SDL3_LIB) -lavformat -lavcodec -lavutil -lswscale \
             -lvulkan-1 -lwinmm -lole32 -lshell32 -lcomdlg32 -luuid -lgdi32 -ladvapi32 -lshaderc_shared -lpdh -lws2_32 -lwinhttp -l:libz.a -lpthread \
-            $(if $(RELEASE),-Wl$(comma)--subsystem$(comma)windows)  # release: no console window (log -> savagewind.log)
+            -Wl,--subsystem,$(WIN_SUBSYSTEM)
 BACKEND_SRC := $(wildcard runtime/nvn/vulkan/*.c) $(wildcard runtime/nvn/vulkan/*.cpp)
 BACKEND_OBJ := $(patsubst runtime/%.cpp,$(B)/rt/%.o,$(patsubst runtime/%.c,$(B)/rt/%.o,$(BACKEND_SRC)))
 BACKEND_OBJ += $(B)/rt/platform/windows_rc.o  # the .exe's icon (Explorer, taskbar)
 WINDRES  ?= windres
+WINDOWS_ICON ?= $(or $(wildcard $(B)/botw-local.ico),docs/icon/icon.ico)
+WINDOWS_ICON_STAMP := $(B)/windows_icon
+$(shell mkdir -p "$(B)" && { [ "$$(cat "$(WINDOWS_ICON_STAMP)" 2>/dev/null)" = '$(WINDOWS_ICON)' ] || printf '%s\n' '$(WINDOWS_ICON)' > "$(WINDOWS_ICON_STAMP)"; })
 IMGUI_OBJ += $(B)/imgui/imgui_impl_vulkan.o
 UIFLAGS  := -x c++ $(OSFLAGS)  # the .mm UI sources are plain C++ apart from __APPLE__ blocks
-GAMELIB  := $(B)/swgame.dll
-# the runtime functions it calls: exported by the .exe, linked through its import library
-LDFLAGS  += -Wl,--export-all-symbols -Wl,--out-implib,$(B)/savagewind.dll.a
-GAMELIB_LDFLAGS := -shared -fuse-ld=lld $(B)/savagewind.dll.a
-GAMELIB_SHARED := -shared  # (+ the import library: runtime/gamebuild.c)
+RT_SRC := $(filter-out runtime/gamebuild.c,$(RT_SRC))
+STATIC_GAME_RSP := $(B)/static-game.rsp
 # "Savage Wind Configuration.exe" in the release: starts savagewind.exe --config (runtime/platform/windows_config.c)
 CONFIG_EXE := $(B)/savagewind-config.exe
 endif
@@ -162,15 +185,19 @@ GAMELIB_SRCS := tools/gen.py tools/lifter.py tools/analyze.py tools/nso.py tools
                 runtime/cpu.h runtime/simd.h runtime/simd_fp.h runtime/simd_softfma.h runtime/gamelib.h
 GAMELIB_SRCS += tools/layout.py tools/game_sites.py
 GAMELIB_ID := $(shell (cat $(GAMELIB_SRCS); echo '$(strip $(GENFLAGS))'; echo '$(GENFLAGS_ZIG)'; echo 'gen $(GENLOCALS)') | (shasum -a 256 2>/dev/null || sha256sum) | cut -c1-16)
+GAME_CONFIG := $(B)/game_config
+GAME_BUILD_FLAGS := $(strip $(GENFLAGS) $(if $(STATIC_GAME_RSP),$(THINLTO)))
+$(shell mkdir -p $(B) && [ -f $(GAME_CONFIG) ] && [ "$$(cat $(GAME_CONFIG) 2>/dev/null)" = '$(GAME_BUILD_FLAGS)' ] || echo '$(GAME_BUILD_FLAGS)' > $(GAME_CONFIG))
 # The compatible target (#9): x86-64 CPUs without AVX2 / FMA / BMI2 get the game code built with GENARCH_COMPAT in
 # place of GENARCH (no -mfma: simd.h's fma is runtime/simd_softfma.h, slower). The start screen builds the one the CPU
 # runs (runtime/gamelib.h gamelib_compat); its id differs, so neither library is ever loaded in place of the other.
 # `make` builds the GENARCH one.
 ifneq ($(strip $(GENARCH)),)
+GAMELIB_TARGETS := -DGAMELIB_ARCH='"$(strip $(GENARCH))"'
 ifneq ($(strip $(GENARCH_COMPAT)),)
 GENFLAGS_COMPAT := $(subst $(strip $(GENARCH)),$(strip $(GENARCH_COMPAT)),$(GENFLAGS))
 GAMELIB_ID_COMPAT := $(shell (cat $(GAMELIB_SRCS); echo '$(strip $(GENFLAGS_COMPAT))'; echo '$(GENFLAGS_ZIG)'; echo 'gen $(GENLOCALS)') | (shasum -a 256 2>/dev/null || sha256sum) | cut -c1-16)
-GAMELIB_TARGETS := -DGAMELIB_ARCH='"$(strip $(GENARCH))"' -DGAMELIB_ARCH_COMPAT='"$(strip $(GENARCH_COMPAT))"' \
+GAMELIB_TARGETS += -DGAMELIB_ARCH_COMPAT='"$(strip $(GENARCH_COMPAT))"' \
                    -DGAMELIB_ID_COMPAT='"$(GAMELIB_ID_COMPAT)"'
 endif
 endif
@@ -204,7 +231,7 @@ RT_OBJ   := $(patsubst runtime/%.c,$(B)/rt/%.o,$(RT_SRC))
 RTFLAGS  := -O2 -g -fno-strict-aliasing -Wall -Wno-unused-function -Iruntime -Iruntime/nvn -isystem third_party -isystem third_party/stb $(DEPINC) $(OSFLAGS)
 CXXFLAGS := -O2 -g -std=c++17 -I$(IMGUI) -I$(IMGUI)/backends -Iruntime -Iruntime/nvn -isystem third_party -Ithird_party/stb $(DEPINC)
 
-# Optional runtime-only optimization. The generated game library keeps GENFLAGS and its build ID.
+# Optional profile-guided optimization for the runtime.
 # Use a separate B for each mode; the stamp also rebuilds runtime objects when flags or profiles change.
 # Profile-guided build of the runtime (not the game library). tools/pgo/runtime.profdata is a ready profile, so
 #   make PGO=use B=build-pgo            optimized build, no training needed
@@ -213,17 +240,18 @@ CXXFLAGS := -O2 -g -std=c++17 -I$(IMGUI) -I$(IMGUI)/backends -Iruntime -Iruntime
 #   make PGO=gen B=build-gen            instrumented savagewind.exe
 #   run it (a scripted walk ending with SAVAGEWIND_EXIT_AT=<frame>, or by hand) with LLVM_PROFILE_FILE=<dir>/rt-%p.profraw
 #   llvm-profdata merge -o tools/pgo/runtime.profdata <dir>/*.profraw
-PGO ?=
-LTO ?=
-PGO_PROFILE ?= tools/pgo/runtime.profdata
+LOCAL_PGO_PROFILE := $(if $(filter windows,$(PLATFORM)),$(wildcard $(B)/local-runtime.profdata))
+PGO ?= $(if $(LOCAL_PGO_PROFILE),use)
+PGO_PROFILE ?= $(or $(LOCAL_PGO_PROFILE),tools/pgo/runtime.profdata)
 ifneq ($(filter-out gen use,$(PGO)),)
 $(error PGO must be empty, gen, or use)
 endif
 ifneq ($(filter-out thin,$(LTO)),)
 $(error LTO must be empty or thin)
 endif
-RUNTIME_OPTFLAGS := $(if $(LTO),-flto=thin)
-RUNTIME_LINKFLAGS := $(if $(LTO),-flto=thin)
+HOST_OPTFLAGS := $(strip $(RUNTIME_ARCH) $(THINLTO))
+RUNTIME_OPTFLAGS := $(HOST_OPTFLAGS)
+RUNTIME_LINKFLAGS := $(THINLTO)
 ifeq ($(PGO),gen)
 RUNTIME_OPTFLAGS += -fprofile-instr-generate -fprofile-update=atomic -mllvm -enable-value-profiling=false -DSW_PGO_GENERATE=1
 RUNTIME_LINKFLAGS += -fprofile-instr-generate
@@ -268,24 +296,24 @@ XESS_INC := -Ithird_party/xess
 $(B)/rt/nvn/vulkan/xess.o: CXXFLAGS := $(XESS_INC) $(CXXFLAGS)
 $(B)/rt/nvn/vulkan/xess.o: third_party/xess/xess.h third_party/xess/xess_vk.h
 
-all: $(EXE) $(CONFIG_EXE) $(if $(strip $(GEN_SRC)),$(GAMELIB))  # (GEN_SRC is a space when there is no generated/)
+all: $(EXE) $(CONFIG_EXE) $(if $(strip $(GEN_SRC)),$(GAMELIB))
 
-$(B)/obj/%.o: $(GEN)/%.c runtime/cpu.h runtime/simd.h runtime/simd_fp.h runtime/simd_softfma.h  # (cpu.h includes them)
+$(B)/obj/%.o: $(GEN)/%.c runtime/cpu.h runtime/simd.h runtime/simd_fp.h runtime/simd_softfma.h $(GAME_CONFIG)
 	@mkdir -p $(dir $@)
-	@$(CC) $(GENFLAGS) -c $< -o $@
+	@$(CC) $(GAME_BUILD_FLAGS) -c $< -o $@
 $(B)/obj/layout.o: runtime/gamelib.h
 
-$(B)/obj/tools/gamelib_entry.o: tools/gamelib_entry.c $(GAMELIB_SRCS) Makefile  # (the id: the flags are in here too)
+$(B)/obj/tools/gamelib_entry.o: tools/gamelib_entry.c $(GAMELIB_SRCS) Makefile $(GAME_CONFIG)
 	@mkdir -p $(dir $@)
-	$(CC) $(GENFLAGS) -DGAMELIB_ID='"$(GAMELIB_ID)"' -c $< -o $@
+	$(CC) $(GAME_BUILD_FLAGS) -DGAMELIB_ID='"$(GAMELIB_ID)"' -c $< -o $@
 $(B)/rt/nvn/maxwell/translate.o $(B)/rt/nvn/vulkan/spirv.o: $(SHADER_IDS)
 $(B)/rt/nvn/maxwell/translate.o $(B)/rt/nvn/vulkan/spirv.o: RTFLAGS += -include $(SHADER_IDS)
 $(B)/rt/main.o: $(B)/source_id
 $(B)/rt/main.o: RTFLAGS += -DSW_SOURCE='"$(SW_SOURCE)"'
-$(B)/rt/gamelib.o: $(GAMELIB_SRCS) Makefile
+$(B)/rt/gamelib.o: $(GAMELIB_SRCS) Makefile $(GAME_CONFIG)
 $(B)/rt/gamelib.o: RTFLAGS += -DGAMELIB_ID='"$(GAMELIB_ID)"' $(GAMELIB_TARGETS)
 # the start screen's build of it (runtime/gamebuild.c) uses the same flags
-$(B)/rt/gamebuild.o: $(GAMELIB_SRCS) Makefile
+$(B)/rt/gamebuild.o: $(GAMELIB_SRCS) Makefile $(GAME_CONFIG)
 $(B)/rt/gamebuild.o: RTFLAGS += -DGAMELIB_CFLAGS='"$(strip $(filter-out -Iruntime,$(GENFLAGS)))"' \
                                 $(if $(GENFLAGS_COMPAT),-DGAMELIB_CFLAGS_COMPAT='"$(strip $(filter-out -Iruntime,$(GENFLAGS_COMPAT)))"') \
                                 -DGAMELIB_ZIGFLAGS='"$(GENFLAGS_ZIG)"' -DGAMELIB_SHARED='"$(GAMELIB_SHARED)"' -DGAMELIB_GENARGS='"$(GENLOCALS)"'
@@ -321,16 +349,55 @@ $(B)/rt/%.o: runtime/%.m $(RT_HDRS)
 # linked to a temp file, then renamed over: a copy of the game still running keeps its (old) file - relinking in
 # place gets running copies killed by macOS (code signature of the changed pages). The temp file keeps the real name
 # (in a folder of its own): on Windows the import library records the name the game code library loads it by.
-$(EXE): $(RT_OBJ) $(BACKEND_OBJ) $(UI_OBJ) $(IMGUI_OBJ)
+$(EXE): $(RT_OBJ) $(BACKEND_OBJ) $(UI_OBJ) $(IMGUI_OBJ) $(WIN_SUBSYSTEM_STAMP) $(STATIC_GAME_RSP)
 	@mkdir -p $(dir $@)link
-	$(CXX) -o $(dir $@)link/$(notdir $@) $^ $(LDFLAGS)
+	$(CXX) -o $(dir $@)link/$(notdir $@) $(filter-out $(WIN_SUBSYSTEM_STAMP) $(STATIC_GAME_RSP) $(SDL3_LIB),$^) $(addprefix -Wl$(comma)@,$(STATIC_GAME_RSP)) $(LDFLAGS)
 	mv -f $(dir $@)link/$(notdir $@) $@
 
+ifeq ($(PLATFORM),windows)
+ifneq ($(SDL3_AUTO),)
+.PHONY: sdl3-local
+sdl3-local:
+	sh tools/build_local_sdl.sh "$(SDL3_ROOT)" "$(SDL3_LOCAL)"
+
+$(SDL3_LIB) $(SDL3_DLL): | sdl3-local
+	@test -f "$@"
+
+$(RT_OBJ) $(BACKEND_OBJ) $(UI_OBJ) $(IMGUI_OBJ): $(wildcard $(SDL3_ROOT)/include/SDL3/*.h) | sdl3-local
+endif
+
+.PHONY: windows-sdl-dlls
+$(EXE): $(SDL3_LIB) | windows-sdl-dlls
+windows-sdl-dlls: $(SDL3_DLL)
+	@mkdir -p "$(B)"
+	@set -e; update_dll() { \
+	    if [ ! -f "$$2" ] || [ "$$(sha256sum < "$$1")" != "$$(sha256sum < "$$2")" ]; then cp "$$1" "$$2"; fi; \
+	}; \
+	update_dll "$(SDL3_DLL)" "$(B)/SDL3.dll"; \
+	usb="$(SDL3_USB_DLL)"; \
+	if [ -z "$$usb" ] && [ -f "$(SDL3_LIBDIR)/libusb-1.0.dll" ]; then usb="$(SDL3_LIBDIR)/libusb-1.0.dll"; fi; \
+	if [ -n "$$usb" ]; then update_dll "$$usb" "$(B)/libusb-1.0.dll"; fi
+
+$(STATIC_GAME_RSP): $(GEN_OBJ) Makefile
+	@test -f "$(GEN)/layout.c" || { echo "Run make gen with your extracted game files before building."; exit 1; }
+	$(file >$@,$(GEN_OBJ))
+endif
+
 # its id file (<library>.id) says what it was built from without loading it (runtime/gamelib.c)
-$(GAMELIB): $(GEN_OBJ) | $(EXE)
-	$(CC) $(GAMELIB_LDFLAGS) -o $@.tmp $^
+
+# The generated game library has hundreds of object files. On Windows the
+# expanded linker command exceeds the shell's argument limit, so feed the
+# current object list through a response file. Old objects from a previous
+# generator layout must not be linked after chunks are renamed or removed.
+ifneq ($(PLATFORM),windows)
+$(B)/swgame.rsp: $(GEN_OBJ) Makefile
+	$(file >$@,$(GEN_OBJ))
+
+$(GAMELIB): $(GEN_OBJ) $(B)/swgame.rsp | $(EXE)
+	$(CC) $(GAMELIB_LDFLAGS) -o $@.tmp @$(B)/swgame.rsp
 	mv -f $@.tmp $@
 	echo $(GAMELIB_ID) > $@.id
+endif
 
 $(B)/rt/ui/i18n.o: $(wildcard runtime/ui/i18n/*.inc) runtime/ui/i18n.h
 $(B)/rt/ui/%.o: runtime/ui/%.mm $(RT_HDRS)
@@ -369,15 +436,15 @@ endif
 # Runtime objects only (no generated code, no link): quick compile check
 runtime-objs: $(RT_OBJ) $(BACKEND_OBJ) $(UI_OBJ)
 
-$(B)/rt/platform/windows_rc.o: runtime/platform/windows.rc runtime/platform/windows.manifest docs/icon/icon.ico
+$(B)/rt/platform/windows_rc.o: runtime/platform/windows.rc runtime/platform/windows.manifest $(WINDOWS_ICON) $(WINDOWS_ICON_STAMP)
 	@mkdir -p $(dir $@)
-	$(WINDRES) -I docs/icon -I runtime/platform -O coff $< -o $@
+	$(WINDRES) -D 'SAVAGEWIND_ICON="$(abspath $(WINDOWS_ICON))"' -I runtime/platform -O coff $< -o $@
 
-$(B)/rt/platform/windows_config.o: runtime/platform/windows_config.c
+$(B)/rt/platform/windows_config.o: runtime/platform/windows_config.c $(B)/runtime_config Makefile
 	@mkdir -p $(dir $@)
-	$(CC) -O2 -Wall $(OSFLAGS) -c $< -o $@
+	$(CC) -O2 -Wall $(OSFLAGS) $(HOST_OPTFLAGS) -c $< -o $@
 $(B)/savagewind-config.exe: $(B)/rt/platform/windows_config.o $(B)/rt/platform/windows_rc.o
-	$(CC) -o $@ $^ -fuse-ld=lld -Wl,--subsystem,windows
+	$(CC) -o $@ $^ $(THINLTO) -fuse-ld=lld -Wl,--subsystem,windows
 
 # "SW Update.exe" in the release (runtime/platform/windows_update.c): static, it replaces every DLL next to it
 SW_UPDATE_LIBS := -static -fuse-ld=lld -municode -Wl,--subsystem,windows -lwinhttp -lbcrypt -lcomctl32 -lshell32 -luser32 -lgdi32
@@ -421,7 +488,7 @@ dmg: app
 # (RELEASE=1: the log goes to savagewind.log next to the exe, fatal errors show a message box). Its DLLs are looked up
 # with build/deps-win/bin first (the FFmpeg DLL names are the same as MSYS2's GPL ones). vulkan-1.dll is left
 # out: every Vulkan driver installs the loader in System32. Saves and game files go next to the exe at run time.
-# Needs: Windows 10+ x64, a Vulkan 1.3 driver, an SSE4.2 CPU (GENARCH_COMPAT x86-64-v2; checked at startup).
+# Needs: Windows 10+ x64, a Vulkan 1.3 driver, and a CPU that supports this build's GENARCH.
 DIST     := build/dist/Savage Wind
 WIN_B    := build/win-release
 # The release runtime is profile-guided with ThinLTO (tools/pgo/runtime.profdata: +19..33% fps at 1080p/1440p TAA on a
@@ -432,45 +499,8 @@ DIST_LTO ?= thin
 deps-windows:
 	tools/build_deps_windows.sh
 dist:
-	@[ -f build/deps-win/lib/libavcodec.dll.a ] || { echo "make deps-windows first (LGPL FFmpeg)"; exit 1; }
-	@[ -d build/helper/swgen ] || { echo "make gen-helper first (the game code generator)"; exit 1; }
-	@! find tools -maxdepth 1 -name '*.py' -newer build/helper/swgen/swgen.exe | grep -q . || \
-	    { echo "make gen-helper first: tools/*.py changed since build/helper/swgen was frozen"; exit 1; }
-	@[ -x build/zig/zig.exe ] || { echo "tools/fetch_zig.sh first (the compiler)"; exit 1; }
-	$(MAKE) B=$(WIN_B) DEPS=$(CURDIR)/build/deps-win RELEASE=1 PGO=$(DIST_PGO) LTO=$(DIST_LTO) $(WIN_B)/savagewind.exe $(WIN_B)/savagewind-config.exe $(WIN_B)/sw-update.exe
-	! nm $(WIN_B)/savagewind.exe | grep ' f_70' >/dev/null  # (no game code inside)
-	rm -rf build/dist && mkdir -p "$(DIST)/gamelib-src"
-	cp $(WIN_B)/savagewind.exe $(WIN_B)/savagewind.dll.a "$(DIST)/"
-	cp $(WIN_B)/savagewind-config.exe "$(DIST)/Savage Wind Configuration.exe"
-	cp $(WIN_B)/sw-update.exe "$(DIST)/SW Update.exe"
-	tools/zig_slim.sh $(strip $(filter-out -Iruntime,$(GENFLAGS))) \
-	    $(if $(GENFLAGS_COMPAT),-- $(strip $(filter-out -Iruntime,$(GENFLAGS_COMPAT))))  # (zig, its runtime built ahead of time)
-	cp -R build/helper/swgen "$(DIST)/"
-	cp -R build/zig-slim "$(DIST)/zig"
-	cp runtime/cpu.h runtime/simd.h runtime/simd_fp.h runtime/simd_softfma.h runtime/gamelib.h tools/gamelib_entry.c \
-	    runtime/hle/hle_symbols.txt "$(DIST)/gamelib-src/"
-	cp docs/icon/icon_1024.png "$(DIST)/icon.png"
-	cp runtime/nvn/vulkan/vk_pipelines.seed "$(DIST)/"  # (the pipeline seed the precompilation reads: hashes and render state, nothing of the game)
-	cp third_party/fonts/FiraSans/FiraSans-SemiBold.ttf third_party/fonts/FiraSans/FiraSans-Medium.ttf "$(DIST)/"  # (menus, OFL)
-	cp third_party/fonts/FiraSans/OFL.txt "$(DIST)/FiraSans-OFL.txt"
-	cp third_party/fonts/NotoSansThai/NotoSansThai-Medium.ttf "$(DIST)/"  # (Thai menus, OFL)
-	cp third_party/fonts/NotoSansThai/OFL.txt "$(DIST)/NotoSansThai-OFL.txt"
-	cp third_party/fonts/NotoSansHebrew/NotoSansHebrew-Medium.ttf "$(DIST)/"  # (Hebrew menus, OFL)
-	cp third_party/fonts/NotoSansHebrew/OFL.txt "$(DIST)/NotoSansHebrew-OFL.txt"
-	cp third_party/FidelityFX/LICENSE.txt "$(DIST)/FidelityFX-LICENSE.txt"  # (AMD FidelityFX SDK, MIT: README "License")
-	if [ -f build/fsr-dlls/amd_fidelityfx_loader_vk.dll ]; then cp build/fsr-dlls/amd_fidelityfx_*_vk.dll \
-	    build/fsr-dlls/AMD-FidelityFX-DLL-LICENSE.txt "$(DIST)/"; fi  # (AMD FSR 4: tools/fetch_fsr_dlls.py; AMD's licence allows binary redistribution with this notice)
-	mkdir "$(DIST)/colour-luts" && cp third_party/luts/*.cube third_party/luts/README.md "$(DIST)/colour-luts/"  # (CC0: Video > Colour)
-	cp README.md LICENSE "$(DIST)/"  # (licenses and source links of the bundled components: README "License")
-	cp recomplauncher.json "$(DIST)/"  # (RecompLauncher reads it from the release to set the game up: next to the exe)
-	PATH="$(CURDIR)/build/deps-win/bin:$$PATH" ldd $(WIN_B)/savagewind.exe | awk '(/ucrt64/ || /deps-win/) && !/vulkan-1/ {print $$3}' | sort -u | \
-	    xargs -I{} cp -u {} "$(DIST)/"
-	! ls "$(DIST)" | grep -iE 'x264|x265|xvid|postproc'  # (no GPL codec libraries in the release)
-	! ls "$(DIST)" | grep -i splash  # (no start screen picture: the player's own, never shipped)
-	python3 tools/make_update_manifest.py "$(DIST)" "$(VERSION)"  # (what SW Update checks and replaces: this list, nothing else)
-	cd build/dist && if command -v zip >/dev/null; then zip -qr "SavageWind-$(VERSION)-windows.zip" "Savage Wind"; \
-	    else /c/Windows/System32/tar.exe -a -cf "SavageWind-$(VERSION)-windows.zip" "Savage Wind"; fi
-	@echo "build/dist/SavageWind-$(VERSION)-windows.zip"
+	@echo 'Windows builds contain locally recompiled game code. Use make for the local build.'
+	@exit 1
 
 # The game code generator as a standalone helper, so players need no Python: build/helper/swgen/ (swgen[.exe] +
 # _internal/), frozen by PyInstaller from tools/swgen.spec in its own venv (build/gen-venv). Shipped as swgen/ next to
@@ -555,6 +585,49 @@ $(B)/test_pc_settings: tests/test_pc_settings.c runtime/settings.c runtime/setti
 	@mkdir -p $(dir $@)
 	$(CC) -O1 -DSDL_STATIC_LIB $(OSFLAGS) $(DEPINC) -Iruntime -o $@ $< -lSDL3 -lm
 
+$(B)/test_gpu_settings: tests/test_gpu_settings.c runtime/settings.c runtime/settings.h runtime/gpu_select.h runtime/hle/bindings.c
+	@mkdir -p $(dir $@)
+	$(CC) -O1 -DSDL_STATIC_LIB $(OSFLAGS) $(DEPINC) -Iruntime -o $@ $< -lSDL3 -lm
+
+test-gpu-settings: $(B)/test_gpu_settings
+	@set -e; tmp=$$(mktemp); trap 'rm -f "$$tmp"' EXIT; \
+	 $(B)/test_gpu_settings "$$tmp" -1; \
+	 for value in auto 0 1 2147483647 -1 nvidia 1junk 2147483648 99999999999999999999999999999; do \
+	   case "$$value" in 0|1|2147483647) expected=$$value;; *) expected=-1;; esac; \
+	   printf 'settings_version = 3\ngpu = %s  \r\n' "$$value" > "$$tmp"; \
+	   $(B)/test_gpu_settings "$$tmp" "$$expected"; \
+	   $(B)/test_gpu_settings "$$tmp" "$$expected"; \
+	 done
+
+.PHONY: test-gpu-settings
+
+$(B)/test_hud_scale: tests/test_hud_scale.c runtime/nvn/hud_scale.h
+	@mkdir -p $(dir $@)
+	$(CC) -O1 -Iruntime -o $@ $< -lm
+
+test-hud-scale: $(B)/test_hud_scale
+	$(B)/test_hud_scale
+
+.PHONY: test-hud-scale
+
+$(B)/test_shrine_sensor: tests/test_shrine_sensor.c runtime/shrine_sensor.c runtime/shrine_sensor.h runtime/settings.h
+	@mkdir -p $(dir $@)
+	$(CC) -O1 -Iruntime -o $@ tests/test_shrine_sensor.c runtime/shrine_sensor.c -lm
+
+test-shrine-sensor: $(B)/test_shrine_sensor
+	$(B)/test_shrine_sensor
+
+.PHONY: test-shrine-sensor
+
+$(B)/test_hud_button_layout: tests/test_hud_button_layout.c runtime/nvn/glyphs.c runtime/services/fs.c runtime/settings.c runtime/hle/bindings.c
+	@mkdir -p $(dir $@)
+	$(CC) -O1 -ffunction-sections -fdata-sections -DSDL_STATIC_LIB $(OSFLAGS) $(DEPINC) -Iruntime -o $@ $< -fuse-ld=lld -Wl,--gc-sections $(if $(filter windows,$(PLATFORM)),-Wl$(comma)--exclude-all-symbols) -lSDL3 -lz -lm
+
+test-hud-button-layout: $(B)/test_hud_button_layout
+	$(B)/test_hud_button_layout
+
+.PHONY: test-hud-button-layout
+
 $(B)/test_game_place: tests/test_game_place.c runtime/game_place.c runtime/game_place.h runtime/game_place_table.inc
 	@mkdir -p $(dir $@)
 	$(CC) -O1 -Iruntime -o $@ $<
@@ -571,7 +644,7 @@ test-pc-controls: $(B)/test_pc_controls $(B)/test_pc_settings $(B)/test_options_
 	$(B)/test_pc_controls
 	$(B)/test_options_pointer
 	@set -e; tmp=$$(mktemp); trap 'rm -f "$$tmp"' EXIT; \
-	 printf 'settings_version = 3\npc_cursor = 1\n' > "$$tmp"; \
+	 printf 'settings_version = 3\npc_cursor = 1\nrumble_strength = 0\n' > "$$tmp"; \
 	 $(B)/test_pc_settings "$$tmp" 1 1 0 0; \
 	 $(B)/test_pc_settings "$$tmp" 0 0 1 1; \
 	 SAVAGEWIND_PC_CURSOR=0 $(B)/test_pc_settings "$$tmp" 0 1 2 2
@@ -600,8 +673,18 @@ $(B)/test_vibration: tools/test_vibration.c runtime/hle/vibration.c runtime/vibr
 	@mkdir -p $(B)
 	$(CC) -O1 -DSDL_STATIC_LIB $(OSFLAGS) $(DEPINC) -Iruntime -o $@ tools/test_vibration.c -lpthread -lm
 
-test-vibration: $(B)/test_vibration
+$(B)/test_vibration_worker: tools/test_vibration_worker.c tools/test_vibration.c runtime/hle/vibration.c runtime/vibration.h runtime/settings.h runtime/services/hid_set.c
+	@mkdir -p $(B)
+	$(CC) -O1 -DSDL_STATIC_LIB $(OSFLAGS) $(DEPINC) -Iruntime -o $@ tools/test_vibration_worker.c -lpthread -lm
+
+# Explicit opt-in device test: run build/test_vibration_device --play.
+$(B)/test_vibration_device: tools/test_vibration_device.c runtime/hle/vibration.c runtime/vibration.h runtime/settings.h
+	@mkdir -p $(B)
+	$(CC) -O1 -DSDL_STATIC_LIB $(OSFLAGS) $(DEPINC) -Iruntime -o $@ $< $(if $(filter windows,$(PLATFORM)),$(SDL3_LIB),$(if $(SDL3_ROOT),-L$(SDL3_ROOT)/lib) -lSDL3) -lpthread -lm
+
+test-vibration: $(B)/test_vibration $(B)/test_vibration_worker
 	$(B)/test_vibration
+	$(B)/test_vibration_worker
 
 .PHONY: test-vibration
 
@@ -789,13 +872,13 @@ test-hour: $(B)/test_hour
 
 .PHONY: test-hour
 
-# The BC5 view format (NVN 0x4C, SAVAGEWIND_BC5_UNORM): vk_format is the only function the section GC keeps from
-# textures.c, so no Vulkan device is needed. Run twice so both initial environment states cache the right format.
+# The BC5 format lookup is shared with textures.c. Link no image backend: PE/COFF
+# retains its external-data reference sections even with section GC. Test both initial environment states.
 ifneq ($(PLATFORM),macos)
-$(B)/test_textures_format: tests/test_textures_format.c runtime/nvn/vulkan/textures.c $(RT_HDRS)
+$(B)/test_textures_format: tests/test_textures_format.c runtime/nvn/vulkan/texture_formats.h
 	@mkdir -p $(dir $@)
 	$(CC) -O2 -ffunction-sections -fdata-sections $(OSFLAGS) $(DEPINC) -Iruntime -Iruntime/nvn -isystem third_party -isystem third_party/stb \
-	    -o $@ tests/test_textures_format.c runtime/nvn/vulkan/textures.c -fuse-ld=lld -Wl,--gc-sections \
+	    -o $@ tests/test_textures_format.c -fuse-ld=lld -Wl,--gc-sections \
 	    $(if $(filter windows,$(PLATFORM)),-Wl$(comma)--exclude-all-symbols) -lpthread -lm
 
 test-textures: $(B)/test_textures_format

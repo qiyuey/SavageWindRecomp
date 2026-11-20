@@ -662,6 +662,20 @@ void rec_CmdPushConstantsMvec(VkCommandBuffer cb, VkPipelineLayout layout, uint3
     ENQ_END();
 }
 
+CMD_ARGS(ExecuteSecondary, VkCommandBuffer secondary;)
+static void ExecuteSecondary_run(const void *p) {
+    const ExecuteSecondaryArgs *a = p;
+    vkCmdExecuteCommands(a->cb, 1, &a->secondary);
+}
+void rec_execute_secondary(VkCommandBuffer primary, VkCommandBuffer secondary) {
+    if (on <= 0) { vkCmdExecuteCommands(primary, 1, &secondary); return; }
+    ENQ_T0();
+    ExecuteSecondaryArgs *a = push(ExecuteSecondary_run, sizeof *a, 0);
+    *a = (ExecuteSecondaryArgs){primary, secondary};
+    commit();
+    ENQ_END();
+}
+
 CMD_ARGS(CmdSetViewport, uint32_t first, n;)  // then VkViewport[n]
 static void CmdSetViewport_run(const void *p) { const CmdSetViewportArgs *a = p; vkCmdSetViewport(a->cb, a->first, a->n, after(a, sizeof *a)); }
 void rec_CmdSetViewport(VkCommandBuffer cb, uint32_t first, uint32_t n, const VkViewport *v) {

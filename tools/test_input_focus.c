@@ -39,7 +39,6 @@ SDL_JoystickID motion_sensor_pad(void) { return pad ? SDL_GetGamepadID(pad) : 0;
 void motion_sensor_event(const SDL_Event *e) { (void)e; sensor_events++; }
 void motion_device_sensor_event(const SDL_Event *e) { (void)e; }
 void vibration_update(SDL_Gamepad *p, bool focused) { (void)p; vibrating = focused; }
-void vibration_pad_closed(SDL_Gamepad *p) { (void)p; }
 uint64_t renderer_present_count(void) { return 0; }
 static uint64_t test_now_ns;
 uint64_t plat_now_ns(void) { return test_now_ns; }
@@ -69,12 +68,12 @@ void control_fly_wheel(float notches) { (void)notches; unexpected_helper(); }
 bool freecam_active(void) { return false; }
 void freecam_toggle(void) { abort(); }
 void freecam_key(int scancode, bool down) { (void)scancode; (void)down; abort(); }
+void photo_pad(uint32_t buttons) { assert(buttons == 0); }
 void freecam_mouse(float dx, float dy) { (void)dx; (void)dy; abort(); }
 void freecam_pad(float lx, float ly, float rx, float ry, float up, float down, bool fast, bool slow) {
     (void)lx; (void)ly; (void)rx; (void)ry; (void)up; (void)down; (void)fast; (void)slow;
 }
 void control_input_frame(uint64_t frame) { (void)frame; }
-void photo_pad(uint32_t buttons) { (void)buttons; }
 void control_input_apply(uint64_t *b, int32_t *lx, int32_t *ly, int32_t *rx, int32_t *ry) { (void)b; (void)lx; (void)ly; (void)rx; (void)ry; }
 bool pc_gyro_keyboard_active(void) { return false; }
 void pc_gyro_scene_tick(void) {}
@@ -169,8 +168,8 @@ int main(void) {
     assert(id);
     SDL_Joystick *joy = SDL_OpenJoystick(id);
     assert(joy);
-    pad = SDL_OpenGamepad(id);  // use the virtual pad even when a physical controller is connected
-    assert(pad);
+    pad_open(id);  // select the virtual pad even when a physical controller is connected
+    assert(pad && SDL_GetGamepadID(pad) == id);
     for (int i = 0; i < BIND_PAD_COUNT; i++) g_bind_pad[i] = -1;
     g_bind_pad[BIND_A] = SDL_GAMEPAD_BUTTON_EAST;
     g_bind_pad[BIND_ZL] = PADB_LTRIGGER;
@@ -256,11 +255,32 @@ int main(void) {
     sample(0, false);
     SDL_DestroyWindow(hidden);
 
+    focus(true);
+    sample(held, true);
+    // Reopen an available controller even when SDL's hotplug events were missed.
     assert(SDL_DetachVirtualJoystick(id));
-    pump();
-    sample(0, false);
+    SDL_CloseJoystick(joy);
+    SDL_JoystickID replacement = SDL_AttachVirtualJoystick(&desc);
+    assert(replacement);
+    SDL_PumpEvents();
+    SDL_FlushEvents(SDL_EVENT_GAMEPAD_ADDED, SDL_EVENT_GAMEPAD_REMOVED);
+    recover_gamepad();
+    assert(pad && SDL_GamepadConnected(pad) && SDL_GetGamepadID(pad) != id);
+    // A press selects the replacement even when recovery picked a different connected pad.
+    joy = SDL_OpenJoystick(replacement);
+    assert(joy);
+    controls(joy, true);
+    assert(SDL_GetGamepadID(pad) == replacement);
+    sample(held, true);
     SDL_CloseJoystick(joy);
 
+    input_shutdown();
+    assert(pad == NULL && !vibrating);
+    input_shutdown(); // Idempotent when exit and window teardown both run.
+
+    assert(SDL_DetachVirtualJoystick(replacement));
+    pump();
+    sample(0, false);
     // While mounted, keyboard forward is suppressed when steering; other input sources stay unchanged.
     focus(true);
     test_now_ns = 1000000000;
@@ -282,5 +302,6 @@ int main(void) {
     puts("input focus checks passed");
 }
 
-void photo_pad(uint32_t buttons) { (void)buttons; }
+void vibration_detach(SDL_Gamepad *p) { (void)p; }
+void vibration_shutdown(void) {}
 uint64_t quick_replace_buttons(uint64_t b) { return b; }

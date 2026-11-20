@@ -36,6 +36,14 @@ extern "C" bool vk_imgui_backend_init(void) {
     return ok;
 }
 
+extern "C" void vk_imgui_new_frame(void) {
+    // ImGui submits its own font upload when the atlas has no texture.
+    const bool upload_fonts = ImGui::GetIO().Fonts->TexID == 0;
+    if (upload_fonts) pthread_mutex_lock(&g_vk_queue_lock);
+    ImGui_ImplVulkan_NewFrame();
+    if (upload_fonts) pthread_mutex_unlock(&g_vk_queue_lock);
+}
+
 // The current context's fonts were made again: its font texture goes once no submitted frame can still read it, and
 // the next NewFrame makes the new one.
 extern "C" void vk_imgui_fonts_changed(void) {

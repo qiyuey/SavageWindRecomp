@@ -13,6 +13,10 @@ generated-*/
 /splash.png
 # build output, caches, saves and settings
 build/
+/savagewind.exe
+/savagewind-config.exe
+/swgame.dll*
+/aoc[0-9]/
 /profile/
 /cache/
 save/

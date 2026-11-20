@@ -39,6 +39,7 @@ void watch_arm(void){abort();}
 bool menu_input_captured(void){return captured;}
 bool framepace_menu_ui(void){return paused;}
 bool framepace_title_ui(void){return false;}
+bool framepace_dialogue_ui(void) { return false; }
 // (the control endpoint and the DSU poll: off here; no controller, so no dual-stick)
 bool control_enabled(void){return false;}
 bool control_fly_toggle(void){abort();}
@@ -47,6 +48,7 @@ void control_fly_wheel(float n){(void)n;abort();}
 bool freecam_active(void) { return false; }
 void freecam_toggle(void) { abort(); }
 void freecam_key(int scancode, bool down) { (void)scancode; (void)down; abort(); }
+void photo_pad(uint32_t buttons) { assert(buttons == 0); }
 void freecam_mouse(float dx, float dy) { (void)dx; (void)dy; abort(); }
 void freecam_pad(float lx, float ly, float rx, float ry, float up, float down, bool fast, bool slow) {
     (void)lx; (void)ly; (void)rx; (void)ry; (void)up; (void)down; (void)fast; (void)slow;
@@ -83,5 +85,6 @@ int main(void){
     puts("PASS: gyro defaults, pitch direction, U/O/P, remapping, camera ownership, disabling, pause/capture/focus and mouse bindings");
 }
 
-void photo_pad(uint32_t buttons) { (void)buttons; }
+void vibration_detach(SDL_Gamepad *p) { (void)p; }
+void vibration_shutdown(void) {}
 uint64_t quick_replace_buttons(uint64_t b) { return b; }

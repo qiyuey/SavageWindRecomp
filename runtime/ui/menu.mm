@@ -549,7 +549,34 @@ static void load_fonts(void) {
 
 // Before a frame: another menu language may need other glyphs - the fonts and their texture are made again
 extern "C" void vk_imgui_fonts_changed(void);  // (runtime/nvn/vulkan/imgui_glue.cpp)
-extern "C" const char *vk_hdr_icc_description(void);  // (runtime/nvn/vulkan/device.c)
+#ifdef _WIN32
+extern "C" const char *vk_hdr_icc_profile(int *peak);
+#endif
+
+const char *hdr_peak_description(void) {
+    static thread_local std::string desc;
+    desc = tr("The brightest your display can show. The scene, flashes, particles, HUD and menus are capped to it. ");
+#ifdef _WIN32
+    int peak;
+    const char *profile = vk_hdr_icc_profile(&peak);
+    if (profile) {
+        char calibration[512];
+        snprintf(calibration, sizeof calibration, tr("Windows HDR calibration profile: %s, %d nits."),
+                 profile[0] ? profile : tr("Unknown"), peak);
+        desc += calibration;
+    } else if (peak < 0) {
+        desc += tr("Windows HDR calibration profile: not read yet.");
+    } else {
+        desc += tr("No Windows HDR calibration profile found; peak defaults to 1000 nits.");
+    }
+#elif defined(SW_METAL)
+    desc += tr("HDR output is not available in the Metal backend.");
+#else
+    desc += tr("No Windows HDR calibration profile on this platform; set the peak manually.");
+#endif
+    desc += tr(" Moves in 10-nit steps.");
+    return desc.c_str();
+}
 static void fonts_follow_language(void) {
     bool need_hint_fonts = (g_settings.quick_sort || g_settings.quick_drop || g_settings.quick_replace) && g_romfs_dir && !g_hint_font_attempted;
     bool icons_changed = (g_settings.quick_sort || g_settings.quick_drop || g_settings.quick_replace) && g_hint_generation != glyphs_font_generation();
@@ -1177,13 +1204,9 @@ static void tab_display(void) {
                 g_settings.hdr_tonemapper = tm;
             const bool psy_off = hdr_off || g_settings.hdr_tonemapper == 0;
             auto psy_sub = [psy_off]() { if (psy_off) opt_disable_next(); };
-            std::string peak_desc = "The brightest your display can show. The scene, flashes, particles, HUD and menus "
-                                    "are capped to it. ";
-            peak_desc += vk_hdr_icc_description();
-            peak_desc += " Moves in 10-nit steps.";
             hdr_sub();
             float p = g_settings.hdr_peak_nits ? (float)g_settings.hdr_peak_nits : 1000.0f;
-            if (opt_slider("HDR peak brightness", &p, 80, 10000, 10, 1000, "%g nits", peak_desc.c_str())) {
+            if (opt_slider("HDR peak brightness", &p, 80, 10000, 10, 1000, "%g nits", hdr_peak_description())) {
                 g_settings.hdr_peak_nits = (int)lroundf(p);
                 hdr_look_init_peak();  // (a default preset slot keeps the newly known peak)
             }
@@ -1865,12 +1888,6 @@ static void tab_about(void) {
     ImGui::Spacing();
     header("Controls");
     opt_toggle("Controller rumble", &g_settings.rumble, true, "Vibrate the controller during play.");
-    if (g_settings.rumble) {
-        float r = (float)g_settings.rumble_strength;
-        if (opt_slider("Rumble strength", &r, RUMBLE_STRENGTH_MIN, RUMBLE_STRENGTH_MAX, 10, RUMBLE_STRENGTH_DEFAULT, "%g%%",
-                       "100% is the game's own."))
-            g_settings.rumble_strength = (int)r;
-    }
     opt_toggle("Free camera with both sticks", &g_settings.freecam_sticks, true,
                "Clicking both sticks together turns the free camera on and off. Home on the keyboard always does. "
                "While it's on: F8 or d-pad up changes the filter, [ and ] or d-pad left and right the hour, F7 or "
@@ -2411,7 +2428,9 @@ static void act_overlay_draw(ImGuiIO &io, float scale) {
 }
 
 #ifndef SW_METAL
-extern "C" void rec_drain(void);  // (runtime/nvn/vulkan/record.c)
+extern "C" void *vk_overlay_begin(void *primary);
+extern "C" void vk_overlay_end(void *primary, void *overlay);
+extern "C" void vk_imgui_new_frame(void);
 #endif
 
 // Native-style selector prompt. Draw-only: input still belongs to the game.
@@ -2481,9 +2500,7 @@ static void quick_inventory_hint_draw(const ImGuiIO &io) {
     }
 }
 
-// Everything menu_render draws, in one place: menu_render_needed (the caller's cue to drain the recorder first) and
-// menu_render (which decides again, and drains itself) must agree on it. The pointer's hover box, the console and the
-// gyro drag were missing here: their frames went to the command buffer while the recorder thread was still filling it.
+// Everything that can draw in the in-game overlay.
 static bool menu_draws(bool *pointer_hover = NULL, float *pointer_box = NULL, bool *gyro_show = NULL, GyroScene *gyro = NULL) {
     float box[4];
     GyroScene gs;
@@ -2494,8 +2511,6 @@ static bool menu_draws(bool *pointer_hover = NULL, float *pointer_box = NULL, bo
     return g_open.load() || g_kbd.load() == 1 || g_sizes.load() || console_is_open() || gyro_on || hover ||
            g_settings.perf_overlay != PERF_OFF || act_log_enabled() || quick_inventory_sort_hint() || quick_drop_hint_state();
 }
-
-bool menu_render_needed(void) { return menu_draws(); }
 
 #ifdef SW_METAL
 void menu_render(id<MTLDevice> dev, id<MTLCommandBuffer> cb, id<MTLTexture> target) {
@@ -2517,12 +2532,6 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
         if (g_inited) { pthread_mutex_lock(&q_lock); q_events.clear(); pthread_mutex_unlock(&q_lock); }
         return;
     }
-#ifndef SW_METAL
-    // ImGui records into the frame's command buffer from this thread, which is the recorder's until it has caught up.
-    // The caller drains when menu_render_needed said so, but the pointer's hover box can appear (and the console and
-    // the gyro drag can open) between that call and this one: draining again here is cheap when nothing is queued.
-    rec_drain();
-#endif
 #ifdef SW_METAL
     if (!g_inited) init(dev);
 #else
@@ -2562,7 +2571,7 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
 #ifdef SW_METAL
     ImGui_ImplMetal_NewFrame(rp);
 #else
-    ImGui_ImplVulkan_NewFrame();
+    vk_imgui_new_frame();
 #endif
     ImGui::NewFrame();
 
@@ -2636,6 +2645,8 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     ImGui_ImplMetal_RenderDrawData(ImGui::GetDrawData(), cb, enc);
     [enc endEncoding];
 #else
-    ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), (VkCommandBuffer)cmd);  // inside the window image's rendering
+    void *overlay = vk_overlay_begin(cmd);
+    ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), (VkCommandBuffer)overlay);
+    vk_overlay_end(cmd, overlay);
 #endif
 }

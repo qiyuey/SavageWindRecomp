@@ -811,72 +811,59 @@ done:
     return 0;
 }
 
-// The active HDR profile is in the display class's per-user ICM profile associations (ICMProfileAC), one group per
-// monitor. The group's last profile is the HDR one (e.g. {SDR.icc, HDR Calibrated Profile.icc}). Pick the group for
-// the game window's monitor; the desktop's GetICMProfile often returns only the SDR sRGB profile.
-typedef struct {
-    wchar_t sub[64];
-} IccGroup;
+// Look up the user association by the monitor's device class key. DISPLAY numbers
+// belong to the adapter and do not index these keys, which can include old monitors.
+static int icc_registry_peak_for_display(const wchar_t *display, wchar_t *name, size_t name_cap) {
+    const wchar_t class_path[] = L"\\Registry\\Machine\\System\\CurrentControlSet\\Control\\Class\\"
+                                 L"{4d36e96e-e325-11ce-bfc1-08002be10318}\\";
+    DISPLAY_DEVICEW device = {0};
+    const wchar_t *group = NULL;
+    for (DWORD i = 0; ; i++) {
+        device.cb = sizeof device;
+        if (!EnumDisplayDevicesW(display, i, &device, 0)) break;
+        if ((device.StateFlags & DISPLAY_DEVICE_ACTIVE) &&
+            !_wcsnicmp(device.DeviceKey, class_path, wcslen(class_path))) {
+            group = device.DeviceKey + wcslen(class_path);
+            break;
+        }
+    }
+    if (!group || !*group) return 0;
 
-static int icc_group_cmp(const void *a, const void *b) {
-    return wcscmp(((const IccGroup *)a)->sub, ((const IccGroup *)b)->sub);
-}
-
-static int icc_registry_peak_for_display(int display, wchar_t *name, size_t name_cap) {
-    HKEY hk;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER,
-                      L"Software\\Microsoft\\Windows NT\\CurrentVersion\\ICM\\ProfileAssociations\\Display\\"
-                      L"{4d36e96e-e325-11ce-bfc1-08002be10318}", 0, KEY_READ, &hk) != ERROR_SUCCESS)
+    wchar_t key[256];
+    if (swprintf(key, 256, L"Software\\Microsoft\\Windows NT\\CurrentVersion\\ICM\\ProfileAssociations\\Display\\"
+                         L"{4d36e96e-e325-11ce-bfc1-08002be10318}\\%ls", group) < 0)
         return 0;
+    HKEY k;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, key, 0, KEY_READ, &k) != ERROR_SUCCESS) return 0;
+
     wchar_t dir[1024];
     UINT dn = GetWindowsDirectoryW(dir, 1000);
     const wchar_t *icc_dir = L"\\System32\\spool\\drivers\\color\\";
-    if (dn && dn + wcslen(icc_dir) < 1024) wcscat(dir, icc_dir);
+    if (dn && dn < 1000 && dn + wcslen(icc_dir) < 1024) wcscat(dir, icc_dir);
     else wcscpy(dir, L"C:\\Windows\\System32\\spool\\drivers\\color\\");
-    IccGroup groups[32];
-    int ng = 0;
-    for (DWORD i = 0; ng < 32; i++) {
-        wchar_t sub[256];
-        DWORD sn = 256;
-        if (RegEnumKeyExW(hk, i, sub, &sn, NULL, NULL, NULL, NULL) != ERROR_SUCCESS) break;
-        HKEY k;
-        if (RegOpenKeyExW(hk, sub, 0, KEY_READ, &k) != ERROR_SUCCESS) continue;
-        DWORD type = 0, cb = 0;
-        if (RegQueryValueExW(k, L"ICMProfileAC", NULL, &type, NULL, &cb) == ERROR_SUCCESS && cb > 0 &&
-            (type == REG_MULTI_SZ || type == REG_SZ))
-            swprintf(groups[ng++].sub, 64, L"%s", sub);
-        RegCloseKey(k);
-    }
-    if (!ng) { RegCloseKey(hk); return 0; }
-    qsort(groups, ng, sizeof groups[0], icc_group_cmp);
-    int gi = display > 0 ? display - 1 : 0;  // DISPLAY1 -> first monitor group, etc.
-    if (gi < 0 || gi >= ng) gi = 0;  // (unknown display: best effort on the first group)
-    HKEY k;
-    if (RegOpenKeyExW(hk, groups[gi].sub, 0, KEY_READ, &k) != ERROR_SUCCESS) {
-        RegCloseKey(hk);
-        return 0;
-    }
     int peak = 0;
     DWORD type = 0, cb = 0;
-    if (RegQueryValueExW(k, L"ICMProfileAC", NULL, &type, NULL, &cb) == ERROR_SUCCESS && cb > 0) {
+    if (RegQueryValueExW(k, L"ICMProfileAC", NULL, &type, NULL, &cb) == ERROR_SUCCESS && cb > 0 &&
+        (type == REG_MULTI_SZ || type == REG_SZ)) {
         wchar_t *list = malloc(cb + sizeof(wchar_t));
         if (list && RegQueryValueExW(k, L"ICMProfileAC", NULL, &type, (BYTE *)list, &cb) == ERROR_SUCCESS) {
             list[cb / sizeof(wchar_t)] = 0;
             for (wchar_t *s = list; *s; s += wcslen(s) + 1) {
                 wchar_t path[1024];
-                if (wcschr(s, L'\\')) swprintf(path, 1024, L"%s", s);
-                else swprintf(path, 1024, L"%s%s", dir, s);
+                int written;
+                if (wcschr(s, L'\\')) written = swprintf(path, 1024, L"%ls", s);
+                else written = swprintf(path, 1024, L"%ls%ls", dir, s);
+                if (written < 0 || written >= 1024) continue;
                 int p = icc_file_peak(path);
                 if (p > 0) {  // the last valid profile is the HDR calibration
                     peak = p;
-                    swprintf(name, name_cap, L"%s", s);
+                    swprintf(name, name_cap, L"%ls", s);
                 }
             }
         }
         free(list);
     }
     RegCloseKey(k);
-    RegCloseKey(hk);
     return peak;
 }
 
@@ -886,11 +873,10 @@ int plat_hdr_peak_nits(void *hwnd_, char *profile, size_t profile_size) {
                         : MonitorFromPoint((POINT){0, 0}, MONITOR_DEFAULTTOPRIMARY);
     MONITORINFOEXW mi;
     mi.cbSize = sizeof mi;
-    int display = 0;
-    if (mon && GetMonitorInfoW(mon, (MONITORINFO *)&mi))
-        swscanf(mi.szDevice, L"\\\\.\\DISPLAY%d", &display);
     wchar_t name[512] = L"";
-    int peak = icc_registry_peak_for_display(display, name, 512);
+    int peak = mon && GetMonitorInfoW(mon, (MONITORINFO *)&mi)
+                   ? icc_registry_peak_for_display(mi.szDevice, name, 512)
+                   : 0;
     if (!peak) {  // (the display's SDR profile may still carry an MHC2 tag)
         HDC hdc = GetDC(hwnd);
         wchar_t path[1024];
@@ -899,7 +885,7 @@ int plat_hdr_peak_nits(void *hwnd_, char *profile, size_t profile_size) {
             peak = icc_file_peak(path);
             if (peak) {
                 const wchar_t *slash = wcsrchr(path, L'\\');
-                swprintf(name, 512, L"%s", slash ? slash + 1 : path);
+                swprintf(name, 512, L"%ls", slash ? slash + 1 : path);
             }
         }
         if (hdc) ReleaseDC(hwnd, hdc);

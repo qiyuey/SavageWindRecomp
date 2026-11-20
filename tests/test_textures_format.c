@@ -9,8 +9,7 @@
 #include <time.h>
 #include <vulkan/vulkan.h>
 
-VkFormat vk_format(uint32_t f);
-bool vk_format_alpha_one(uint32_t f);
+#include "../runtime/nvn/vulkan/texture_formats.h"
 
 static void set_unorm(int on) {
 #ifdef _WIN32
@@ -27,17 +26,17 @@ int main(int argc, char **argv) {
     bool want_unorm = getenv("SAVAGEWIND_BC5_UNORM") != NULL;
     VkFormat want = want_unorm ? VK_FORMAT_BC5_UNORM_BLOCK : VK_FORMAT_BC5_SNORM_BLOCK;
 
-    assert(vk_format(0x4C) == want);
-    assert(!vk_format_alpha_one(0x4C));
+    assert(fmt_of(0x4C).vf == want);
+    assert(!fmt_of(0x4C).alpha_one);
 
     set_unorm(!want_unorm);
     assert((getenv("SAVAGEWIND_BC5_UNORM") != NULL) != want_unorm);
-    assert(vk_format(0x4C) == want);
+    assert(fmt_of(0x4C).vf == want);
 
-    assert(vk_format(0x4A) == VK_FORMAT_BC4_SNORM_BLOCK);
-    assert(vk_format(0x4B) == VK_FORMAT_BC5_UNORM_BLOCK);
-    assert(vk_format(0x4D) == VK_FORMAT_BC7_UNORM_BLOCK);
-    assert(vk_format(0x4E) == VK_FORMAT_BC7_SRGB_BLOCK);
+    assert(fmt_of(0x4A).vf == VK_FORMAT_BC4_SNORM_BLOCK);
+    assert(fmt_of(0x4B).vf == VK_FORMAT_BC5_UNORM_BLOCK);
+    assert(fmt_of(0x4D).vf == VK_FORMAT_BC7_UNORM_BLOCK);
+    assert(fmt_of(0x4E).vf == VK_FORMAT_BC7_SRGB_BLOCK);
 
     puts("PASS: 0x4C honours SAVAGEWIND_BC5_UNORM and reads it only once");
 
@@ -46,12 +45,12 @@ int main(int argc, char **argv) {
         const char *volatile key = "SAVAGEWIND_BC5_UNORM";  // volatile: not hoisted out of the loop
         volatile uintptr_t sink = 0;
         double t0 = now_ns();
-        for (int i = 0; i < n; i++) sink ^= (uintptr_t)vk_format(0x4C);
+        for (int i = 0; i < n; i++) sink ^= (uintptr_t)fmt_of(0x4C).vf;
         double cached = (now_ns() - t0) / n;
         t0 = now_ns();
         for (int i = 0; i < n; i++) sink ^= (uintptr_t)getenv(key);
         double raw = (now_ns() - t0) / n;
-        printf("vk_format(0x4C): %.2f ns/call; getenv: %.2f ns/call (%.0fx)\n", cached, raw, raw / cached);
+        printf("fmt_of(0x4C).vf: %.2f ns/call; getenv: %.2f ns/call (%.0fx)\n", cached, raw, raw / cached);
         (void)sink;
     }
     return 0;

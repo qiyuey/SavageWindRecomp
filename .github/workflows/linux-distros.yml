@@ -1,5 +1,5 @@
 # Builds the app (start screen only, no game code) from source in each supported distribution's container, with that
-# distribution's own clang, SDL3, FFmpeg, shaderc and lld: the same check tools/linux/distro_build.sh runs locally.
+# distribution's own clang, FFmpeg, shaderc and lld, plus the pinned SDL3 fork used by the game.
 # Not run on pull requests (five containers are slow): it runs when test or main move, and by hand.
 name: Linux distributions
 

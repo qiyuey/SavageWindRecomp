@@ -29,6 +29,7 @@ import sys
 import tempfile
 import time
 import zlib
+from pathlib import Path
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -713,7 +714,7 @@ def ui_cases(r):
         else:
             if tree(os.path.join(backups, names[0])) != before:
                 problems.append('the backup is not the old save folder')
-            if os.path.join(backups, names[0]) != o.get('BACKUP'):
+            if Path(backups, names[0]) != Path(o.get('BACKUP', '')):
                 problems.append('the popup named another folder: %s' % o.get('BACKUP'))
         if tree(save).get('sdcard/note.txt') != b'SD':
             problems.append('the SD card folder was not carried over')
@@ -810,7 +811,8 @@ def ui_cases(r):
     old_stage, old_backup = tree(stage), tree(backup)
     rc, o, log = ui_run(exe, 'recovery', save, game, cwd=data)
     r.result('Saves tab: interrupted installation keeps both copies and names the recovery folders',
-             [] if (rc == 0 and o.get('RECOVERY_IMPORT') == stage and o.get('RECOVERY_BACKUP') == backup
+             [] if (rc == 0 and Path(o.get('RECOVERY_IMPORT', '')) == Path(stage)
+                    and Path(o.get('RECOVERY_BACKUP', '')) == Path(backup)
                     and not os.path.exists(save) and tree(stage) == old_stage and tree(backup) == old_backup) else [log[-600:]])
 
     # the Back up saves button

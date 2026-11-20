@@ -18,6 +18,7 @@ extern "C" {
 // ---- start / mode (exec.c vk_exec_init, before any command)
 void rec_init(void);
 bool rec_on(void);  // commands go through the recorder thread
+void rec_execute_secondary(VkCommandBuffer primary, VkCommandBuffer secondary);
 bool rec_on_recorder(void);  // the calling thread is the recorder (inside a rec_custom call): it must queue nothing
 
 // ---- command buffers, submissions

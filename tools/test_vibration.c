@@ -1,36 +1,58 @@
 // Synthetic HID -> SDL checks, with no game files or physical controller. make test-vibration
+#define VIBRATION_TEST
+#ifndef VIBRATION_WORKER_TEST
+#define VIBRATION_MANUAL_TEST
+#endif
 #include <assert.h>
 #include <stdio.h>
-#include <time.h>
 #include "../runtime/hle/vibration.c"
 #include "../runtime/services/hid_set.c"
 
-Settings g_settings = {.rumble = true, .rumble_strength = 100};
+Settings g_settings = {.rumble = true};
 
 static uint64_t now;
 static unsigned calls;
 static uint16_t motor_low, motor_high;
 static uint32_t duration;
-static int rumble_delay_ms;
-static void sleep_ms(int ms) {
-    struct timespec ts = {.tv_sec = ms / 1000, .tv_nsec = (long)(ms % 1000) * 1000000L};
-    nanosleep(&ts, NULL);
+static VibrationValue bands[2];
+static unsigned failures, joystick_updates;
+static bool check_stereo, stall_output, output_entered;
+static pthread_cond_t test_output_gate = PTHREAD_COND_INITIALIZER;
+void SDL_UpdateJoysticks(void) { pthread_mutex_lock(&lock); ++joystick_updates; pthread_mutex_unlock(&lock); }
+static uint64_t call_times[4096];
+bool SDL_SetHintWithPriority(const char *name, const char *value, SDL_HintPriority priority) { return true; }
+Uint64 SDL_GetTicksNS(void) {
+#ifdef VIBRATION_WORKER_TEST
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (Uint64)t.tv_sec * 1000000000 + t.tv_nsec;
+#else
+    return now * 1000000;
+#endif
 }
-static double mono_ms(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1000000.0;
-}
-Uint64 SDL_GetTicks(void) { return now; }
-bool SDL_RumbleGamepad(SDL_Gamepad *pad, Uint16 low, Uint16 high, Uint32 ms) {
+Uint64 SDL_GetTicks(void) { return SDL_GetTicksNS() / 1000000; }
+bool SDL_RumbleGamepadFrequenciesEx(SDL_Gamepad *pad,
+        float la, float lf, float lh, float lhf, float ra, float rf, float rh, float rhf, Uint32 ms) {
     assert(pad);
-    if (rumble_delay_ms > 0) sleep_ms(rumble_delay_ms);
-    motor_low = low; motor_high = high; duration = ms; calls++;
-    return true;
-}
-static void update_sync(SDL_Gamepad *pad, bool focused) {
-    vibration_update(pad, focused);
-    vibration_flush();
+    pthread_mutex_lock(&lock);
+    if (check_stereo) assert(la == ra && lh == rh && lf == rf && lhf == rhf);
+    bands[0] = (VibrationValue){la, lf, lh, lhf};
+    bands[1] = (VibrationValue){ra, rf, rh, rhf};
+    motor_low = (Uint16)lroundf(fmaxf(la, ra) * 65535);
+    motor_high = (Uint16)lroundf(fmaxf(lh, rh) * 65535);
+    duration = ms;
+    if (calls < 4096) {
+        call_times[calls] = SDL_GetTicksNS();
+    }
+    calls++;
+    if (stall_output) {
+        output_entered = true;
+        while (stall_output) pthread_cond_wait(&test_output_gate, &lock);
+    }
+    bool ok = failures == 0;
+    if (failures) --failures;
+    pthread_mutex_unlock(&lock);
+    return ok;
 }
 const char *SDL_GetError(void) { return "test"; }
 
@@ -70,99 +92,83 @@ int main(void) {
 
     // Single-device command: the value starts at byte 4, not at the aligned user id at byte 24.
     uint8_t packet[32] = {0};
-    VibrationValue value = {.25f, 160, .5f, 320};
+    VibrationValue value = {.025f, 160, .05f, 320};
     memcpy(packet, &left, 4); memcpy(packet + 4, &value, sizeof value);
     command(201, packet, sizeof packet);
-    update_sync(pad, true);
-    assert(motor_low == 16384 && motor_high == 32768 && duration == 100);
+    vibration_update(pad, true);
+    assert(motor_low == 8192 && motor_high == 16384 && duration == 100);
     unsigned before = calls;
-    now = 49; update_sync(pad, true); assert(calls == before);
-    now = 50; update_sync(pad, true); assert(calls == before + 1);
+    now = 49; vibration_update(pad, true); assert(calls == before);
+    now = 50; vibration_update(pad, true); assert(calls == before + 1);
+    assert(motor_low == 8192 && motor_high == 16384);  // refresh applies gain only once
     resp = command(202, packet, 16);
     assert(resp.data_size == sizeof value && memcmp(resp.data, &value, sizeof value) == 0);
     command(201, packet, 4);  // truncated: leave the current effect alone
-    assert(vibration_get(left).low_amplitude == .25f);
+    assert(vibration_get(left).low_amplitude == .025f);
 
     uint32_t handles[] = {left, right};
-    VibrationValue batch[] = {{.75f, 100, .1f, 200}, {.2f, 180, .9f, 400}};
+    VibrationValue batch[] = {{.75f, 100, .375f, 200}, {.125f, 180, .5f, 400}};
     IpcReq req = {.cmd = 206, .nx = 2, .x = {
         {(uintptr_t)handles, sizeof handles}, {(uintptr_t)batch, sizeof batch}}};
     resp = (IpcResp){0}; hid(NULL, &req, &resp);
-    update_sync(pad, true);
-    assert(motor_low == 49151 && motor_high == 58982);
+    vibration_update(pad, true);
+    assert(motor_low == 65535 && motor_high == 65535);
+    const VibrationValue expected[] = {{1, 100, .5f, 200}, {.25f, 180, 1, 400}};
+    assert(memcmp(bands, expected, sizeof bands) == 0);
+    before = calls;
+    batch[1].high_frequency = 410;  // frequency-only changes must reach the driver immediately
+    vibration_send(right, &batch[1]); vibration_update(pad, true);
+    assert(calls == before + 1 && bands[1].high_frequency == 410);
     // Bound iteration by the shorter buffer; an incomplete trailing value must not be read.
     batch[0].low_amplitude = .6f; req.x[1].size = sizeof(VibrationValue) + 1;
     hid(NULL, &req, &resp);
-    assert(vibration_get(left).low_amplitude == .6f && vibration_get(right).high_amplitude == .9f);
+    assert(vibration_get(left).low_amplitude == .6f && vibration_get(right).high_amplitude == .5f);
 
     // The player's toggle stops active motors without changing the game's HID permission.
     g_settings.rumble = false;
-    update_sync(pad, true);
+    vibration_update(pad, true);
     assert(motor_low == 0 && motor_high == 0 && vibration_permitted());
     command(201, packet, sizeof packet);
     assert(vibration_get(left).low_amplitude == 0);
     vibration_reset();
     assert(!g_settings.rumble);  // returning to the title screen preserves the preference
     g_settings.rumble = true;
-    update_sync(pad, true);
+    vibration_update(pad, true);
     assert(motor_low == 0 && motor_high == 0);  // no stale effect after re-enabling
     command(201, packet, sizeof packet);
-    update_sync(pad, true);
-    assert(motor_low == 16384 && motor_high == 32768);
-
-    // Rumble strength scales the motor output proportionally.
-    g_settings.rumble_strength = 50;
-    update_sync(pad, true);
+    vibration_update(pad, true);
     assert(motor_low == 8192 && motor_high == 16384);
-    g_settings.rumble_strength = 100;
-    update_sync(pad, true);
-    assert(motor_low == 16384 && motor_high == 32768);
 
     uint8_t allow = 0; command(204, &allow, 1);
-    update_sync(pad, true); assert(motor_low == 0 && motor_high == 0);
+    vibration_update(pad, true); assert(motor_low == 0 && motor_high == 0);
     command(201, packet, sizeof packet);
     assert(vibration_get(left).low_amplitude == 0);
     allow = 1; command(204, &allow, 1);
-    update_sync(pad, true); assert(motor_low == 0);  // do not resume an old effect
+    vibration_update(pad, true); assert(motor_low == 0);  // do not resume an old effect
 
     value = (VibrationValue){NAN, 160, INFINITY, 320};
-    vibration_send(left, &value); update_sync(pad, true);
+    vibration_send(left, &value); vibration_update(pad, true);
     assert(motor_low == 0 && motor_high == 0);
+    value = (VibrationValue){1, NAN, 1, 320};
+    vibration_send(left, &value); vibration_update(pad, true);
+    assert(bands[0].low_amplitude == 0 && bands[0].low_frequency == 160);
     value = (VibrationValue){-1, 160, 2, 320};
-    vibration_send(left, &value); update_sync(pad, true);
+    vibration_send(left, &value); vibration_update(pad, true);
     assert(motor_low == 0 && motor_high == 65535);
     value = (VibrationValue){1, 160, 1, 320};
     vibration_send(0x00000103, &value);  // player 2: must not drive player 1
     assert(vibration_get(left).low_amplitude == 0);
     vibration_send(0, &value); assert(vibration_get(left).low_amplitude == 0);
-    update_sync(pad, false); assert(motor_high == 0);
-    update_sync(pad, true); assert(motor_high == 0);
+    vibration_update(pad, false); assert(motor_high == 0);
+    vibration_update(pad, true); assert(motor_high == 0);
     vibration_send(0x00002003, &value);  // handheld aliases the same physical controller
-    update_sync(pad, true); assert(motor_low == 65535);
-    update_sync(NULL, false);
-    update_sync(pad, true); assert(vibration_get(left).low_amplitude == 0);
+    vibration_update(pad, true); assert(motor_low == 65535);
+    vibration_update(NULL, false);
+    vibration_update(pad, true); assert(vibration_get(left).low_amplitude == 0);
     vibration_send(left, &value); command(210, NULL, 0);
-    update_sync(pad, true); assert(motor_low == 0);
+    vibration_update(pad, true); assert(motor_low == 0);
     vibration_send(left, &value); vibration_reset();
-    update_sync(pad, true); assert(motor_low == 0 && vibration_permitted());
-
-    // Slow blocking SDL_RumbleGamepad (e.g. Bluetooth DualSense on Windows) must not block vibration_update,
-    // and rapid updates while in flight must coalesce to the latest request.
-    rumble_delay_ms = 40;
-    unsigned before_slow = calls;
-    double t0 = mono_ms();
-    for (int step = 1; step <= 10; step++) {
-        value = (VibrationValue){step * 0.1f, 160, 0, 320};
-        vibration_send(left, &value);
-        vibration_update(pad, true);
-    }
-    double elapsed = mono_ms() - t0;
-    assert(elapsed < 20.0);
-    vibration_flush();
-    assert(motor_low == 65535 && calls - before_slow < 10);
-    vibration_pad_closed(pad);
-    rumble_delay_ms = 0;
-
-    puts("vibration: HID packets, batching, motors, focus, disconnect, async rumble and reboot checks passed");
+    vibration_update(pad, true); assert(motor_low == 0 && vibration_permitted());
+    puts("vibration: HID packets, batching, motors, focus, disconnect and reboot checks passed");
     return 0;
 }

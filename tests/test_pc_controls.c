@@ -76,20 +76,18 @@ bool framepace_menu_ui(void) { return game_menu; }
 bool framepace_title_ui(void) { return title_menu; }
 Cpu *kernel_current_cpu(void) { abort(); }
 bool pc_cursor_event(const SDL_Event *e) { (void)e; return false; }
-void motion_pad_opened(SDL_Gamepad *p) { (void)p; abort(); }
-void motion_pad_closed(void) { abort(); }
+void motion_pads(SDL_Gamepad *p, SDL_Gamepad *const *pads, int count) { (void)p; (void)pads; (void)count; }
+void motion_pad_removed(SDL_Gamepad *p) { (void)p; abort(); }
+bool motion_pad_sensor_only(SDL_Gamepad *p) { (void)p; return false; }
+bool motion_pad_pressed(SDL_JoystickID id, uint64_t ns) { (void)id; (void)ns; return false; }
+bool motion_pads_twins(SDL_JoystickID a, SDL_JoystickID b) { (void)a; (void)b; return false; }
+SDL_JoystickID motion_sensor_pad(void) { return 0; }
+void motion_device_sensor_event(const SDL_Event *e) { (void)e; abort(); }
 void motion_sensor_event(const SDL_Event *e) { (void)e; abort(); }
 void motion_mouse(float x, float y) { tilt_mouse_x=x;tilt_mouse_y=y; }
 void motion_mouse_yaw(float steps) { tilt_mouse_yaw=steps; }
 bool motion_has_sensors(void) { return sensor_pad; }
 void motion_script(float p, float r, float x, float y) { (void)p; (void)r; (void)x; (void)y; abort(); }
-void motion_pads(SDL_Gamepad *in_use, SDL_Gamepad *const *p, int n) { (void)in_use; (void)p; (void)n; }
-void motion_pad_removed(SDL_Gamepad *p) { (void)p; }
-bool motion_pad_pressed(SDL_JoystickID id, uint64_t ns) { (void)id; (void)ns; return false; }
-bool motion_pads_twins(SDL_JoystickID a, SDL_JoystickID b) { (void)a; (void)b; return false; }
-bool motion_pad_sensor_only(SDL_Gamepad *p) { (void)p; return false; }
-SDL_JoystickID motion_sensor_pad(void) { return 0; }
-void motion_device_sensor_event(const SDL_Event *e) { (void)e; }
 bool framepace_dialogue_ui(void) { return false; }
 void watch_arm(void) { abort(); }
 
@@ -276,4 +274,6 @@ int main(void) {
     puts("PASS: PrintScreen triggers screenshot capture");
 }
 
+void vibration_detach(SDL_Gamepad *p) { (void)p; }
+void vibration_shutdown(void) {}
 uint64_t quick_replace_buttons(uint64_t b) { return b; }

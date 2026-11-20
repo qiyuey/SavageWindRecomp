@@ -39,6 +39,9 @@ bool rt_resource(const char *name, const char *dev_rel, char *out, size_t n) {
     return false;
 }
 int input_pad_family(void) { return 0; }
+bool framepace_dialogue_ui(void) { return false; }
+bool input_cam_live(void) { return false; }
+uint64_t framepace_period_ns(void) { return 16666667; }
 int input_last_device(void) { return 0; }
 bool pc_cursor_preview_active(void) { return false; }
 bool pc_cursor_sensor_active(void) { return false; }
@@ -46,8 +49,13 @@ bool fsr3_upscaler_enabled(void) { return false; }
 float winsize_refresh_rate(void) { return 0; }
 void menu_tex_add(const uint8_t *b, uint64_t n) { (void)b, (void)n; }
 int menu_tex_count(void) { return 0; }
-void text_sheet_add(const uint8_t *b, uint64_t n) { (void)b, (void)n; }
+void text_sheet_add(const uint8_t *b, size_t n, const TextSheetInfo *info) { (void)b; (void)n; (void)info; }
 int text_sheet_count(void) { return 0; }
+bool text_upscale(const uint8_t *src, uint32_t w, uint32_t h, uint32_t scale, bool edges,
+                  uint32_t cell_w, uint32_t cell_h, uint8_t *dst) {
+    (void)src; (void)w; (void)h; (void)scale; (void)edges; (void)cell_w; (void)cell_h; (void)dst;
+    return false;
+}
 uint8_t *yaz0_unpack(const uint8_t *z, size_t zn, size_t *out_n) { (void)z, (void)zn, (void)out_n; return NULL; }
 int sarc_find(const uint8_t *arc, size_t an, const char *name, uint32_t *doff, uint32_t *s, uint32_t *e) {
     (void)arc, (void)an, (void)name, (void)doff, (void)s, (void)e;

@@ -59,13 +59,8 @@ SERVICE("hid", hid) {
         if (!handles || !values) break;
         uint64_t n = handles->size / sizeof(uint32_t), nv = values->size / sizeof(VibrationValue);
         if (n > nv) n = nv;
-        for (uint64_t i = 0; i < n; i++) {
-            uint32_t h;
-            VibrationValue v;
-            memcpy(&h, (const void *)(uintptr_t)(handles->addr + i * sizeof h), sizeof h);
-            memcpy(&v, (const void *)(uintptr_t)(values->addr + i * sizeof v), sizeof v);
-            vibration_send(h, &v);
-        }
+        vibration_send_batch((const void *)(uintptr_t)handles->addr,
+                             (const void *)(uintptr_t)values->addr, n);
         break;
     }
     case 207: case 208: case 209: break;
