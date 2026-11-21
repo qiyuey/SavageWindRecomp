@@ -89,6 +89,7 @@ void motion_mouse_yaw(float steps) { tilt_mouse_yaw=steps; }
 bool motion_has_sensors(void) { return sensor_pad; }
 void motion_script(float p, float r, float x, float y) { (void)p; (void)r; (void)x; (void)y; abort(); }
 bool framepace_dialogue_ui(void) { return false; }
+bool framepace_in_event(void) { return false; }
 void watch_arm(void) { abort(); }
 
 static void update(void) { input_mouse_update((SDL_Window *)(uintptr_t)1); }
