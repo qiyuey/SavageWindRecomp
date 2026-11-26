@@ -42,3 +42,5 @@ jobs:
       - name: Build
         run: |
           make -j$(nproc) runtime-objs build/savagewind-config.exe SDL3_ROOT=build/ci-sdl/install SDL3_LIBDIR=build/ci-sdl/install/bin SDL3_LIB=build/ci-sdl/install/lib/libSDL3.dll.a
+      - name: CPU target checks (synthetic hardware)
+        run: make test-game-cpu

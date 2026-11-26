@@ -47,8 +47,12 @@ MINFLAG  := $(if $(MACOS_MIN),-mmacosx-version-min=$(MACOS_MIN))
 CC       := clang $(MINFLAG) $(CROSS)
 CXX      := clang++ $(MINFLAG) $(CROSS)
 IMGUI    := third_party/imgui
-GAME_OPT ?= $(if $(filter windows,$(PLATFORM)),-O2,-O1)
-GENFLAGS := $(GAME_OPT) -fno-strict-aliasing -Wno-return-type -Wno-unused-label -fvisibility=hidden -Iruntime
+# The game code's optimization: -O2 since Beta 1 (on a 5600X the game's thread did 6-8% less work a frame than with
+# -O1, the whole CPU ~5% less; the setup's build took 31% longer, 395 -> 519 s on 12 threads; tools/test_simd.py
+# --locals passes at -O2). GENOPT=-O1 builds it as before. Part of GAMELIB_ID, as every flag here.
+GAME_OPT ?= -O2
+GENOPT   ?= $(GAME_OPT)
+GENFLAGS := $(GENOPT) -fno-strict-aliasing -Wno-return-type -Wno-unused-label -fvisibility=hidden -Iruntime
 # RECOMP_LOCALS=1 (the default since Alpha 5): the generator keeps each function's most used registers and its flags in
 # C locals (gen.py --locals, docs/RECOMP-LOCALS.md); RECOMP_LOCALS=0 builds the plain game code. It is part of
 # GAMELIB_ID, so a library built one way is never loaded for the other.
@@ -56,7 +60,7 @@ RECOMP_LOCALS ?= 1
 GENLOCALS := $(if $(filter 1,$(RECOMP_LOCALS)),--locals)
 # The start screen's zig cc reads -O1 as its own "fast" mode (clang -O2 with the loop and SLP vectorizers) and adds
 # debug info and frame pointers: these give it what clang -O1 builds here, in a third less time (runtime/gamebuild.c)
-GENFLAGS_ZIG := -Xclang $(GAME_OPT) $(if $(filter -O1,$(GAME_OPT)),-fno-vectorize -fno-slp-vectorize) -g0 -fomit-frame-pointer
+GENFLAGS_ZIG := -Xclang $(GENOPT) $(if $(filter -O1,$(GENOPT)),-fno-vectorize -fno-slp-vectorize) -g0 -fomit-frame-pointer
 
 # The game code (made by `make gen` from your own game files) is its own library next to the app (runtime/gamelib.h);
 # the app itself holds none of it. $(GEN)/layout.c, then a folder per module (main, subsdk*, sdk)
@@ -324,6 +328,7 @@ $(B)/rt/prof_sampler.o: RTFLAGS += -fms-extensions
 $(B)/rt/memscan_os.o: RTFLAGS += -fms-extensions
 
 $(B)/rt/control_places.o: runtime/control_places_data.inc  # (the generated table of shrines, Koroks ...)
+$(B)/rt/pinyin.o: runtime/pinyin_data.inc  # (the hanzi readings, tools/gen_pinyin_table.py)
 
 $(B)/rt/%.o: runtime/%.c $(RT_HDRS)
 	@mkdir -p $(dir $@)
@@ -577,6 +582,16 @@ test-actions: $(B)/test_actions
 
 .PHONY: test-actions
 
+# the Accessibility assists' arithmetic (runtime/assists.c): wear, damage, stamina drain
+$(B)/test_assists: tools/test_assists.c runtime/assists.c runtime/settings.h
+	@mkdir -p $(B)
+	$(CC) -O1 $(OSFLAGS) $(DEPINC) -Iruntime -o $@ tools/test_assists.c runtime/assists.c
+
+test-assists: $(B)/test_assists
+	$(B)/test_assists
+
+.PHONY: test-assists
+
 $(B)/test_pc_controls: tests/test_pc_controls.c runtime/hle/input.c runtime/hle/bindings.c runtime/settings.h
 	@mkdir -p $(dir $@)
 	$(CC) -O2 -ffunction-sections -fdata-sections -DSDL_STATIC_LIB $(OSFLAGS) $(DEPINC) -Iruntime -isystem third_party -o $@ $< -fuse-ld=lld -Wl,--gc-sections $(if $(filter windows,$(PLATFORM)),-Wl$(comma)--exclude-all-symbols) -lSDL3 -lm
@@ -631,6 +646,20 @@ test-hud-button-layout: $(B)/test_hud_button_layout
 $(B)/test_game_place: tests/test_game_place.c runtime/game_place.c runtime/game_place.h runtime/game_place_table.inc
 	@mkdir -p $(dir $@)
 	$(CC) -O1 -Iruntime -o $@ $<
+
+# Cheats > Collectible hints on the map: the table built from the player's own game files, the same as
+# tools/gen_collectibles.py builds it. The player supplies RomFS locally; nothing of it is distributed.
+$(B)/test_collectibles_table: tests/test_collectibles_table.c runtime/collectibles_table.c runtime/collectibles_table.h \
+                              runtime/services/formats.c runtime/services/archive.c $(RT_HDRS)
+	@mkdir -p $(dir $@)
+	$(CC) -O1 -Iruntime -o $@ $(filter %.c,$^)
+
+test-collectibles: $(B)/test_collectibles_table
+	@test -n "$(ROMFS)" || { echo 'Set ROMFS to your own extracted game RomFS directory.'; exit 2; }
+	$(B)/test_collectibles_table "$(ROMFS)" > $(B)/collectibles_c.txt
+	$(firstword $(PY) python3) tools/gen_collectibles.py "$(ROMFS)" $(B)/collectibles_c.txt
+
+.PHONY: test-collectibles
 
 $(B)/test_discord_rpc: tests/test_discord_rpc.c runtime/discord_rpc.c runtime/discord_rpc.h
 	@mkdir -p $(dir $@)
@@ -806,9 +835,30 @@ test-mods: $(B)/test_mods
 
 .PHONY: test-mods
 
+# Pinyin for the search fields (runtime/pinyin.c): the readings of a few ordinary Chinese names, and what a search
+# typed on a controller's ASCII on-screen keyboard finds with them
+$(B)/test_pinyin: tools/test_pinyin.c runtime/pinyin.c runtime/pinyin.h runtime/pinyin_data.inc
+	@mkdir -p $(B)
+	$(CC) -O1 -Wall -Wextra -Werror -std=gnu11 -Iruntime -o $@ tools/test_pinyin.c runtime/pinyin.c
+
+test-pinyin: $(B)/test_pinyin
+	$(B)/test_pinyin
+	$(firstword $(PY) python3) tools/test_pinyin_table.py
+
+.PHONY: test-pinyin
+
 $(B)/test_game_file_size: tools/test_game_file_size.c runtime/game_file_size.c runtime/game_file_size.h runtime/game_files.h
 	@mkdir -p $(B)
 	$(CC) -O1 -Wall $(OSFLAGS) -Iruntime -o $@ tools/test_game_file_size.c runtime/game_file_size.c
+
+$(B)/test_game_cpu: tools/test_game_cpu.c runtime/game_cpu.h
+	@mkdir -p $(B)
+	$(CC) -O1 -Wall -Wextra -Werror -std=gnu11 -Iruntime -o $@ tools/test_game_cpu.c
+
+test-game-cpu: $(B)/test_game_cpu
+	$(B)/test_game_cpu
+
+.PHONY: test-game-cpu
 
 test-game-file-size: $(B)/test_game_file_size
 	$(B)/test_game_file_size
@@ -872,6 +922,11 @@ test-hour: $(B)/test_hour
 
 .PHONY: test-hour
 
+# Tests that keep a few functions of a large runtime file and let --gc-sections drop the rest. ELF lld reports an
+# undefined symbol only when live code uses it; COFF lld (Windows) reports them before discarding sections, so there
+# the link allows them.
+GC_TEST_UNDEF := $(if $(filter windows,$(PLATFORM)),-Wl$(comma)-Xlink=-force:unresolved)
+
 # The BC5 format lookup is shared with textures.c. Link no image backend: PE/COFF
 # retains its external-data reference sections even with section GC. Test both initial environment states.
 ifneq ($(PLATFORM),macos)
@@ -897,7 +952,7 @@ $(B)/two_button_bindings.o: runtime/hle/bindings.c runtime/input_bind.h
 	$(CC) -O1 -ffunction-sections -fdata-sections -DSDL_STATIC_LIB $(OSFLAGS) $(DEPINC) -Iruntime -c $< -o $@
 
 $(B)/test_two_button_rows: tools/test_two_button_rows.cpp runtime/ui/game_options.mm runtime/ui/binding_row_layout.h $(B)/two_button_bindings.o
-	$(CXX) -std=c++17 -O1 -ffunction-sections -fdata-sections -DSDL_STATIC_LIB $(OSFLAGS) $(DEPINC) -Iruntime -Ithird_party -o $@ $< $(B)/two_button_bindings.o -fuse-ld=lld -Wl,--gc-sections $(if $(filter windows,$(PLATFORM)),-Wl$(comma)--exclude-all-symbols) -lSDL3 -lm
+	$(CXX) -std=c++17 -O1 -ffunction-sections -fdata-sections -DSDL_STATIC_LIB $(OSFLAGS) $(DEPINC) -Iruntime -Ithird_party -o $@ $< $(B)/two_button_bindings.o -fuse-ld=lld -Wl,--gc-sections $(if $(filter windows,$(PLATFORM)),-Wl$(comma)--exclude-all-symbols) $(GC_TEST_UNDEF) -lSDL3 -lm
 
 test-two-button-rows: $(B)/test_two_button_rows
 	$(B)/test_two_button_rows

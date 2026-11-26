@@ -25,9 +25,9 @@ The runtime also uses PGO when `build/local-runtime.profdata` exists.
 To use another profile, pass `PGO=use PGO_PROFILE=<path-to-merged-profdata>`.
 
 NVIDIA DLSS needs no SDK at build time: `runtime/nvn/vulkan/dlss.c` loads the NVIDIA driver's NGX at run time, and
-NGX loads `nvngx_dlss.dll` from the folder of `savagewind.exe`. It is neither in this repository nor in `make dist`: the
-setup downloads NVIDIA's own copy (`runtime/dlss_fetch.c`, NVIDIA/DLSS `v310.9.16`, size and SHA-256 checked). For a
-source build, run the setup once, or copy that release's `nvngx_dlss.dll` into `build/`.
+NGX loads `nvngx_dlss.dll` and `nvngx_dlssg.dll` from the folder of `savagewind.exe`. Neither is in this repository or
+in `make dist`: the setup downloads NVIDIA's own copies (`runtime/dlss_fetch.c`, NVIDIA/DLSS `v310.9.16`, size and
+SHA-256 checked). For a source build, run the setup once, or copy the two DLLs of that release into `build/`.
 
 When `../SDL3` exists, Make incrementally builds its current source as a libusb-enabled UCRT64 Release
 dependency and copies SDL3 and libusb into the game's `build/`. Sync that checkout separately to control
