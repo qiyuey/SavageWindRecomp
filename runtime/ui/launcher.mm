@@ -54,10 +54,11 @@ extern "C" {
 #include "paths.h"
 #include "gamebuild.h"
 #include "gamelib.h"
+#ifndef _WIN32
 // (runtime/gamelib.c; declared here, not in gamelib.h, which is part of the game code library's id)
-// True when game_dir's library has this build's id but its file can't be loaded: cut short or overwritten (an
-// interrupted build, a disk or a security program; #1084: error 193 at Play). gamelib_present is false for it.
+// True when game_dir's library has this build's id but its file can't be loaded.
 extern "C" bool gamelib_damaged(const char *game_dir);
+#endif
 #include "game_versions.h"
 #include "dlc_check.h"
 #include "dlss_fetch.h"
@@ -297,11 +298,13 @@ static const char *const DLC_MERGED = "The DLC is merged into romfs";
 static std::string check_game_files(const std::string &root) {
     std::string why = check_copied_files(root);
     if (why.empty() && rt_romfs_dlc_merged((root + "/romfs").c_str())) return DLC_MERGED;
+#ifndef _WIN32
     if (why.empty() && !gamelib_present(root.c_str())) {  // (a library with another id: an update of Savage Wind, or
         if (!file_exists(root + "/" GAMELIB_NAME)) return "Game code not built yet";  // a PC with another kind of CPU)
-        if (gamelib_damaged(root.c_str())) return "Game code damaged";  // (#1084: error 193 at Play)
+        if (gamelib_damaged(root.c_str())) return "Game code damaged";
         return gamelib_other_cpu(root.c_str()) ? "Game code built for another CPU" : "Game code built for another version";
     }
+#endif
     return why;
 }
 
